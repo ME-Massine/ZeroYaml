@@ -68,7 +68,10 @@ this document must then be checked against.
 | Go, version from `runner/go.mod` | Runner |
 | `curl` | Sending a local webhook delivery |
 | `grpcurl` | Dispatching a Job by hand ([Section 8](#8-observe-one-job-execution)) |
-| `psql`, or another PostgreSQL client | Persistence checks |
+| `perl` with the core `Digest::SHA` module | Signing a local delivery from bash ([Section 7.1](#71-signed-local-delivery)); ships with Linux and macOS |
+
+No host PostgreSQL client is needed: every persistence check runs `psql`
+inside the `zeroyaml-postgres` container.
 
 PowerShell blocks are for Windows and run unchanged on Windows PowerShell 5.1
 and PowerShell 7. Bash blocks are for Linux and macOS.
@@ -330,11 +333,15 @@ curl.exe -i -X POST http://localhost:8080/webhooks/github `
 ```
 
 ```bash
-secret="$(cat "$HOME/.zeroyaml-webhook-secret")"
 payload_file="$(mktemp)"
 printf '%s' '{"ref":"refs/heads/main","after":"0f4b1a1e2c3d4e5f60718293a4b5c6d7e8f90a1b"}' > "$payload_file"
 
-digest="$(openssl dgst -sha256 -hmac "$secret" -hex "$payload_file" | awk '{print $NF}')"
+digest="$(perl -MDigest::SHA=hmac_sha256_hex -e '
+  local $/;
+  open my $key, "<:raw", $ARGV[0] or die "secret file: $!";
+  open my $body, "<:raw", $ARGV[1] or die "payload file: $!";
+  print hmac_sha256_hex(scalar <$body>, scalar <$key>);
+' "$HOME/.zeroyaml-webhook-secret" "$payload_file")"
 
 curl -i -X POST http://localhost:8080/webhooks/github \
   -H "Content-Type: application/json" \
@@ -343,6 +350,11 @@ curl -i -X POST http://localhost:8080/webhooks/github \
   -H "X-Hub-Signature-256: sha256=$digest" \
   --data-binary "@$payload_file"
 ```
+
+The bash block hands `perl` the two file paths and lets it read the key itself.
+`openssl dgst -hmac "$secret"` is avoided on purpose: it puts the secret on the
+command line, where any local user can read it from the process list, and
+`openssl` offers no way to read an HMAC key from a file.
 
 Expected response:
 
@@ -372,14 +384,16 @@ path, so each is worth running once:
 | --- | --- |
 | Corrupt one character of the digest | `401`, outcome `REJECTED`, `WARN` log, no handler line |
 | Drop the `X-Hub-Signature-256` header | `401`, outcome `REJECTED` |
-| `X-GitHub-Event: ping`, digest recomputed | `200`, outcome `IGNORED` |
-| `X-GitHub-Event: pull_request`, digest recomputed | `200`, outcome `IGNORED` |
+| `X-GitHub-Event: ping`, same body and digest | `200`, outcome `IGNORED` |
+| `X-GitHub-Event: pull_request`, same body and digest | `200`, outcome `IGNORED` |
 | Drop the `X-GitHub-Delivery` header | `400`, outcome `REJECTED` |
 | `Content-Type: text/plain` | `415`, outcome `REJECTED` |
 | Body above `zeroyaml.github.webhook.max-payload-size` | `413`, outcome `REJECTED` |
 
-An unverified delivery is rejected before the event allow-list is consulted, so
-an unauthenticated caller cannot learn which events the endpoint acts on.
+The signature covers the body bytes only, so changing a header never requires a
+new digest. An unverified delivery is rejected before the event allow-list is
+consulted, so an unauthenticated caller cannot learn which events the endpoint
+acts on.
 
 ### 7.2 Delivery from GitHub itself
 
@@ -402,17 +416,20 @@ sandbox, the status-report contract, and the Control Plane's reconciliation of
 a report — the parts [#30](https://github.com/MohamedMBG/ZeroYaml/issues/30)
 will drive from a push.
 
-Prepare a source repository below `ZEROYAML_RUNNER_LOCAL_SOURCE_ROOT`:
+Prepare a source repository below `ZEROYAML_RUNNER_LOCAL_SOURCE_ROOT`. Start in
+the repository root: both blocks return there, and the dispatch that follows
+resolves `-import-path proto` against it.
 
 ```powershell
-New-Item -ItemType Directory C:\zeroyaml-sources\demo | Out-Null
+New-Item -ItemType Directory -Force -Path C:\zeroyaml-sources\demo | Out-Null
 Push-Location C:\zeroyaml-sources\demo
 git init --initial-branch=main
 'hello' | Out-File -Encoding ascii greeting.txt
 git add greeting.txt
 git commit -m "add greeting"
-$revision = git rev-parse HEAD
+$revision = git rev-parse --verify HEAD
 Pop-Location
+if (-not $revision) { throw 'No commit exists in the demo repository. Set git user.name and user.email, then run this block again.' }
 ```
 
 ```bash
@@ -422,12 +439,22 @@ git init --initial-branch=main
 echo 'hello' > greeting.txt
 git add greeting.txt
 git commit -m "add greeting"
-revision="$(git rev-parse HEAD)"
+revision="$(git rev-parse --verify HEAD)"
 cd -
+[ -n "$revision" ] || echo 'No commit exists in the demo repository. Set git user.name and user.email, then run this block again.' >&2
 ```
 
-Run the bash dispatch below in the same shell, so `$revision` is still set; an
-empty revision fails request validation.
+Both blocks can be run again: on a later run `git commit` reports that there is
+nothing to commit and the existing commit is reused. `--verify` matters when no
+commit was ever created, for example because `user.name` and `user.email` are
+not configured: a plain `git rev-parse HEAD` then prints the literal `HEAD`,
+which the Runner accepts as a revision and fails only later, inside the
+checkout, as `execution_error`.
+
+Run the dispatch below in the same shell, PowerShell or bash, and from the
+repository root. `$revision` exists only in the shell that prepared the
+repository, and an empty or null revision is refused with `INVALID_ARGUMENT`;
+from any other directory `grpcurl` cannot find `runner/v1/runner.proto`.
 
 Dispatch it. The Runner registers no gRPC reflection service, so `grpcurl` is
 pointed at the contract in `proto/`:
@@ -559,9 +586,24 @@ rules are in
 | --- | --- |
 | `HEALTHY` | A registration or heartbeat was acknowledged within `zeroyaml.registration.heartbeat-timeout` |
 | `UNAVAILABLE` | That window passed without one |
+| `UNKNOWN` | No Runner ever registered under this `runner_id` in the life of this Control Plane process |
 
 Liveness is derived on demand from the last acknowledged contact. There is no
 background sweep and no distributed failure detector.
+
+`UNKNOWN` is the state of a Runner that started before the Control Plane, or
+whose registration never reached it, and of every Runner after a Control Plane
+restart until it registers again. A Runner rejected with an identity conflict
+is different: its `runner_id` has an entry, owned by the earlier instance, so
+the liveness reported is that instance's.
+
+Liveness cannot be read from a running Control Plane yet. Nothing outside the
+registry calls `RunnerRegistry.livenessOf` — no HTTP endpoint, log line, or
+metric reports it — until Runner selection
+([#24](https://github.com/MohamedMBG/ZeroYaml/issues/24)) consumes it. Locally
+it is inferred from the Runner side: an accepted registration line followed by
+no heartbeat warnings means `HEALTHY`, and the derivation itself is covered by
+the Control Plane `registration` tests ([Section 11](#11-automated-coverage)).
 
 ### Persistence checks
 
@@ -570,8 +612,16 @@ background sweep and no distributed failure detector.
 | Schema applied | `docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml -c "\dt"` | `repository_connection` and Flyway's `flyway_schema_history` |
 | Migration recorded | `... -c "SELECT version, description, success FROM flyway_schema_history;"` | `1`, `success = t` |
 | Connection row | `... -c "SELECT provider, owner, name, status FROM repository_connection;"` | The row from [Section 6](#6-connect-a-repository) |
-| Connection survives a restart | Restart the Control Plane, repeat the row check | The row is still present |
+| Connection survives a restart | `docker compose -f ./infra/compose.yaml down`, then `up -d postgres`, then repeat the row check | The row is still present, because `down` without `-v` removes the container and keeps the `postgres-data` volume |
 | Job state survives a restart | — | Not expected. Jobs are held in a process-local store and are lost on restart until [#28](https://github.com/MohamedMBG/ZeroYaml/issues/28) |
+
+The restart check recreates PostgreSQL, not the Control Plane, because the row
+lives in the database and a Control Plane restart cannot lose it. Database
+calls made while PostgreSQL is down fail until it is back. Restarting the
+Control Plane is not part of this check and has a side effect: it empties the
+in-memory Runner registry, so the Runner from
+[Section 4.3](#43-runner) is answered `HEARTBEAT_UNKNOWN_RUNNER` from then on
+and must be restarted to register again.
 
 Captured Job logs have no persistence check yet; log streaming is
 [#26](https://github.com/MohamedMBG/ZeroYaml/issues/26). Until then, command
@@ -599,7 +649,9 @@ output is visible only in the Job container's own output.
 | `Runner registration with the Control Plane at localhost:50052 failed - runner local-runner stays unavailable` | The Control Plane is not started, or listens elsewhere | Start the Control Plane first, or set `ZEROYAML_CONTROLPLANE_ADDRESS` to its `zeroyaml.registration.port` |
 | The same message ending in `DeadlineExceeded` while the Control Plane is up and listening | Resolving `localhost` took longer than `ZEROYAML_RUNNER_REGISTRATION_TIMEOUT` (default `5s`); observed on Windows | Set `ZEROYAML_CONTROLPLANE_ADDRESS` to `127.0.0.1:50052`, or raise the timeout |
 | `rejected registration for runner local-runner - identity conflict` | This `ZEROYAML_RUNNER_ID` is already registered under a different instance: another Runner is running, or this Runner was restarted after an accepted registration | Stop the other Runner if there is one, then restart the Control Plane to clear its in-memory registry, or give this Runner a distinct `ZEROYAML_RUNNER_ID` |
-| Every dispatch answered `JOB_REJECTION_RUNNER_UNAVAILABLE` | Registration was not accepted, or Docker was unavailable at startup | Fix the cause, then restart the Runner; both checks run once at startup. If the earlier registration was accepted, restart the Control Plane first to avoid an identity conflict |
+| Every dispatch answered `JOB_REJECTION_RUNNER_UNAVAILABLE`, message `runner status is ... and it is not accepting work` | Registration was not accepted, or Docker was unavailable at startup | Fix the cause, then restart the Runner; both checks run once at startup. If the earlier registration was accepted, restart the Control Plane first to avoid an identity conflict |
+| A dispatch answered `JOB_REJECTION_RUNNER_UNAVAILABLE`, message `runner is already running its maximum number of concurrent jobs` | Every execution slot is in use; `ZEROYAML_RUNNER_MAX_CONCURRENT_JOBS` defaults to `1` | Wait for the running Job's terminal report and dispatch again, or raise the limit. Do not restart the Runner: that cancels the healthy running Job |
+| A dispatch answered `JOB_REJECTION_RUNNER_UNAVAILABLE`, message `runner is shutting down and accepts no new jobs` | The Runner received `SIGINT` or `SIGTERM` and is draining | Dispatch again once the Runner has been started again |
 | Dispatch answered `JOB_REJECTION_UNSUPPORTED_PROTOCOL_VERSION` | `protocol_version` is not `runner.v1` | Send the version declared in `proto/runner/v1/runner.proto` |
 | Dispatch fails with `INVALID_ARGUMENT` and no response body | A contract violation, such as a missing job identity or an empty command | Fix the request; a caller defect is deliberately not answered with a rejection |
 | Heartbeats answered `HEARTBEAT_UNKNOWN_RUNNER` | The Control Plane restarted and lost its in-memory registry | Restart the Runner so it registers again |
@@ -616,7 +668,7 @@ output is visible only in the Job container's own output.
 | Dispatch fails with `FAILED_PRECONDITION`: `file repository locations are disabled on this runner` | `ZEROYAML_RUNNER_LOCAL_SOURCE_ROOT` is unset | Set it to an existing absolute directory and restart the Runner |
 | Dispatch fails with `FAILED_PRECONDITION`: `file repository location is outside the configured local source root` | The path escapes the root, including through a symlink | Move the source below the root; containment is checked after symlinks are resolved |
 | Terminal report with reason `timeout` | The execution exceeded `ZEROYAML_RUNNER_JOB_TIMEOUT` | Raise the timeout or shorten the command; the checkout counts toward the same budget |
-| Containers or volumes left behind after a crash | The Runner exited before cleanup finished | Remove them by label: `docker rm -f $(docker ps -aq --filter label=io.zeroyaml.managed=true)`, then `docker volume prune --filter label=io.zeroyaml.managed=true` |
+| Containers or volumes left behind after a crash | The Runner exited before cleanup finished | Remove them by label: `docker rm -f $(docker ps -aq --filter label=io.zeroyaml.managed=true)`, then `docker volume rm $(docker volume ls -q --filter label=io.zeroyaml.managed=true)`. `docker volume prune` with the same filter is not enough: workspace volumes are named, and since Docker Engine 23 `prune` removes only anonymous volumes unless `--all` is passed |
 | `go test ./...` fails in `internal/sandbox` | Container tests were opted into without a usable daemon | Unset `ZEROYAML_RUNNER_DOCKER_TESTS`, or start Docker |
 | Control Plane tests cannot start a container | Testcontainers needs a reachable daemon | Start Docker; these tests use a disposable `postgres:16-alpine` and never the compose database |
 
