@@ -1,6 +1,6 @@
 # ZeroYAML Project Progress
 
-Last updated: 2026-10-10 (Phase 2: local workflow documentation corrections proposed for issue #32)
+Last updated: 2026-10-11 (Phase 2: local workflow documentation corrected against an executed local run for issue #32)
 
 Current phase: 2
 
@@ -56,7 +56,7 @@ The Runner Docker execution sandbox for issue #25 is merged into `main`. A Runne
 
 ## In progress
 
-- Issue #32, local end-to-end development workflow documentation: proposed on a task branch and awaiting review; nothing is merged into `main` yet. `docs/local-development-workflow.md` sequences the startup of infrastructure, Control Plane, and Runner, records the required configuration and safe webhook secret handling, reproduces the supported signed `push` delivery, documents the Job lifecycle and liveness states and the persistence checks, and collects troubleshooting for the webhook, gRPC, Docker, and PostgreSQL boundaries. `README.md` and `DEVELOPER_GUIDE.md` link to it. The document states per step which parts of the push-to-execution chain are wired today and which remain open issues, because its dependencies #30 and #31 are not closed: a verified `push` currently stops at an audit record (#20 normalizes it), and an execution is reached by dispatching `RunJob` by hand because nothing creates Jobs (#23) or selects a Runner (#24) yet. No application behavior changed.
+- Issue #32, local end-to-end development workflow documentation: proposed on a task branch and awaiting review; nothing is merged into `main` yet. `docs/local-development-workflow.md` sequences the startup of infrastructure, Control Plane, and Runner, records the required configuration and safe webhook secret handling, reproduces the supported signed `push` delivery, documents the Job lifecycle and liveness states and the persistence checks, and collects troubleshooting for the webhook, gRPC, Docker, and PostgreSQL boundaries. `README.md` and `DEVELOPER_GUIDE.md` link to it. The document states per step which parts of the push-to-execution chain are wired today and which remain open issues, because its dependencies #30 and #31 are not closed: a verified `push` currently stops at an audit record (#20 normalizes it), and an execution is reached by dispatching `RunJob` by hand because nothing creates Jobs (#23) or selects a Runner (#24) yet. No application behavior changed. The proposed pull request references #32 without a closing keyword, so #32 stays open until #30 and #31 land and the remaining acceptance criteria are verified.
 - The remaining Phase 2 child issues (#20-#24, #26, #28-#31) are open backlog.
 
 ## Roadmap
@@ -94,7 +94,9 @@ The Runner Docker execution sandbox for issue #25 is merged into `main`. A Runne
 - One webhook secret is configured for the whole Control Plane. Per-repository secrets and rotation without downtime are not supported; they belong with repository metadata persistence (#19) and Phase 6 security work.
 - A verified delivery can still be replayed, because deliveries are not deduplicated yet. Recording delivery identifiers under a unique constraint is tracked as issue #203.
 - `docs/local-development-workflow.md` documents two separately verified halves rather than one continuous push-to-execution run, because #30 and #31 are open. Its expected-state and automated-coverage sections therefore record what is wired and what is not, and they must be re-verified against the end-to-end test from #31 once it exists; acceptance criteria of #32 that depend on that test remain unmet until then.
-- The documented local workflow is derived from reading the code and has not been executed end to end. No automated check asserts that the runbook's commands, log lines, or response codes still match the code, so a behavior change can leave it stale until the next manual run.
+- The documented local workflow was executed by hand once, on Windows on 2026-10-11: startup, the signed delivery with its negative checks, and one succeeded and one failed Job execution. The bash blocks were not run on Linux or macOS, and the two halves were not run as one continuous scenario. No automated check asserts that the runbook's commands, log lines, or response codes still match the code, so a behavior change can leave it stale until the next manual run.
+- A Runner restarted after an accepted registration is rejected with an identity conflict until the Control Plane restarts, because each Runner process generates a new instance identifier and the in-memory registry never releases the earlier one. The runbook documents the workaround; releasing or replacing a stale registration needs its own issue.
+- The Runner's single startup registration attempt can exceed its `5s` default bound when resolving `localhost` is slow, which was observed on Windows and leaves the Runner unavailable. The runbook documents the `127.0.0.1` workaround; no retry exists for the startup registration.
 
 ## Update policy
 

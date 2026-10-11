@@ -70,6 +70,9 @@ this document must then be checked against.
 | `grpcurl` | Dispatching a Job by hand ([Section 8](#8-observe-one-job-execution)) |
 | `psql`, or another PostgreSQL client | Persistence checks |
 
+PowerShell blocks are for Windows and run unchanged on Windows PowerShell 5.1
+and PowerShell 7. Bash blocks are for Linux and macOS.
+
 Verify the toolchain before starting anything:
 
 ```powershell
@@ -210,6 +213,13 @@ sends a heartbeat every `ZEROYAML_RUNNER_HEARTBEAT_INTERVAL` (default `5s`);
 the Control Plane reports the registry entry `UNAVAILABLE` once
 `zeroyaml.registration.heartbeat-timeout` (default `15s`) passes without one.
 
+Each Runner process generates a new instance identifier, and the Control Plane
+registry keeps the first instance registered under a `ZEROYAML_RUNNER_ID` for
+as long as the Control Plane process lives. A Runner restarted after an
+accepted registration is therefore rejected with an identity conflict and stays
+unavailable. Restart the Control Plane before restarting such a Runner, or
+start the Runner under a different `ZEROYAML_RUNNER_ID`.
+
 `:50051` is the Runner's configurable default, not a fixed port. Override it
 with `ZEROYAML_RUNNER_GRPC_ADDRESS` and point the Control Plane at the new
 value with `ZEROYAML_RUNNER_PORT`.
@@ -337,7 +347,7 @@ curl -i -X POST http://localhost:8080/webhooks/github \
 Expected response:
 
 ```text
-HTTP/1.1 202 Accepted
+HTTP/1.1 202
 
 {"deliveryId":"72d3162e-cc78-11e3-81ab-4c9367dc0958","event":"push","outcome":"ACCEPTED","message":"delivery accepted for processing"}
 ```
@@ -345,8 +355,8 @@ HTTP/1.1 202 Accepted
 Expected Control Plane log lines, in this order:
 
 ```text
-INFO  i.z.c.g.w.LoggingGitHubWebhookDeliveryHandler  : GitHub delivery 72d3162e-... for event push recorded without further processing (<n> payload bytes)
-INFO  i.z.c.g.w.GitHubWebhookController              : Accepted GitHub delivery 72d3162e-... for event push (<n> payload bytes)
+INFO  .g.w.LoggingGitHubWebhookDeliveryHandler : GitHub delivery 72d3162e-... for event push recorded without further processing (<n> payload bytes)
+INFO  i.z.c.g.webhook.GitHubWebhookController  : Accepted GitHub delivery 72d3162e-... for event push (<n> payload bytes)
 ```
 
 The controller logs `Accepted` only after the delivery handler returns, so the
@@ -433,8 +443,11 @@ $request = @{
 } | ConvertTo-Json -Depth 5
 
 $request | grpcurl -plaintext -import-path proto -proto runner/v1/runner.proto `
-  -d @ localhost:50051 zeroyaml.runner.v1.RunnerService/RunJob
+  -d '@' localhost:50051 zeroyaml.runner.v1.RunnerService/RunJob
 ```
+
+The `@` is quoted because PowerShell rejects a bare `@` argument with a parser
+error.
 
 ```bash
 grpcurl -plaintext -import-path proto -proto runner/v1/runner.proto -d @ \
@@ -457,6 +470,7 @@ a dispatch must not block on job duration:
 {
   "jobId": "<uuid>",
   "acceptance": "JOB_ACCEPTED",
+  "message": "job accepted by the runner",
   "runnerId": "local-runner",
   "instanceId": "<uuid>"
 }
@@ -583,19 +597,20 @@ output is visible only in the Job container's own output.
 | Symptom | Cause | Action |
 | --- | --- | --- |
 | `Runner registration with the Control Plane at localhost:50052 failed - runner local-runner stays unavailable` | The Control Plane is not started, or listens elsewhere | Start the Control Plane first, or set `ZEROYAML_CONTROLPLANE_ADDRESS` to its `zeroyaml.registration.port` |
-| Registration rejected as an identity conflict | Another process already registered this `ZEROYAML_RUNNER_ID` under a different instance | Stop the other Runner, or give this one a distinct `ZEROYAML_RUNNER_ID` |
-| Every dispatch answered `JOB_REJECTION_RUNNER_UNAVAILABLE` | Registration was not accepted, or Docker was unavailable at startup | Fix the cause, then restart the Runner; both checks run once at startup |
+| The same message ending in `DeadlineExceeded` while the Control Plane is up and listening | Resolving `localhost` took longer than `ZEROYAML_RUNNER_REGISTRATION_TIMEOUT` (default `5s`); observed on Windows | Set `ZEROYAML_CONTROLPLANE_ADDRESS` to `127.0.0.1:50052`, or raise the timeout |
+| `rejected registration for runner local-runner - identity conflict` | This `ZEROYAML_RUNNER_ID` is already registered under a different instance: another Runner is running, or this Runner was restarted after an accepted registration | Stop the other Runner if there is one, then restart the Control Plane to clear its in-memory registry, or give this Runner a distinct `ZEROYAML_RUNNER_ID` |
+| Every dispatch answered `JOB_REJECTION_RUNNER_UNAVAILABLE` | Registration was not accepted, or Docker was unavailable at startup | Fix the cause, then restart the Runner; both checks run once at startup. If the earlier registration was accepted, restart the Control Plane first to avoid an identity conflict |
 | Dispatch answered `JOB_REJECTION_UNSUPPORTED_PROTOCOL_VERSION` | `protocol_version` is not `runner.v1` | Send the version declared in `proto/runner/v1/runner.proto` |
 | Dispatch fails with `INVALID_ARGUMENT` and no response body | A contract violation, such as a missing job identity or an empty command | Fix the request; a caller defect is deliberately not answered with a rejection |
 | Heartbeats answered `HEARTBEAT_UNKNOWN_RUNNER` | The Control Plane restarted and lost its in-memory registry | Restart the Runner so it registers again |
 | Control Plane startup fails with `Failed to start the runner-facing gRPC server on port 50052` | The port is already bound | Stop the other process, or change `zeroyaml.registration.port` and `ZEROYAML_CONTROLPLANE_ADDRESS` together |
-| `grpcurl` reports an unknown service | The Runner registers no reflection service | Pass `-import-path proto -proto runner/v1/runner.proto` |
+| `grpcurl` reports `server does not support the reflection API` | The Runner registers no reflection service | Pass `-import-path proto -proto runner/v1/runner.proto` |
 
 ### Docker
 
 | Symptom | Cause | Action |
 | --- | --- | --- |
-| `docker daemon unavailable - runner will not accept jobs` | The daemon is not running, or did not answer within 5 s | Start Docker Desktop, confirm `docker version`, then restart the Runner |
+| `docker daemon unavailable - runner will not accept jobs` | The daemon is not running, or did not answer within 5 s | Start Docker Desktop, confirm `docker version`, then restart the Control Plane and the Runner; the Runner's registration is accepted even when the probe fails, so restarting it alone ends in an identity conflict |
 | Terminal report with reason `execution_error` | The workspace or the executor could not be prepared, for example a missing image | Pre-pull `ZEROYAML_RUNNER_JOB_IMAGE` and `ZEROYAML_RUNNER_CHECKOUT_IMAGE` |
 | Dispatch fails with `FAILED_PRECONDITION`, naming the scheme | The repository scheme is not `https`, `http`, or `file` | Use a supported scheme; other git transports can run arbitrary commands and are refused |
 | Dispatch fails with `FAILED_PRECONDITION`: `file repository locations are disabled on this runner` | `ZEROYAML_RUNNER_LOCAL_SOURCE_ROOT` is unset | Set it to an existing absolute directory and restart the Runner |
@@ -654,8 +669,9 @@ What the suites already cover, per step of this document:
 | Status reporting and reconciliation | Runner `jobstatus` tests; Control Plane `execution` tests |
 | A push through to an execution | Not covered — [#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) |
 
-No automated test spans a push to an execution yet, so the two halves in
-Sections 7 and 8 rest on a reading of the code and have not been run end to end. When
+No automated test spans a push to an execution yet. The two halves in Sections
+7 and 8 were each executed by hand on Windows on 2026-10-11, and nothing has
+run them as one continuous push-to-execution scenario. When
 [#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) lands, this document
 must be checked against that test and corrected wherever the two disagree; the
 test is authoritative.
