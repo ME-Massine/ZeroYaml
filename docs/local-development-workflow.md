@@ -69,6 +69,8 @@ this document must then be checked against.
 | `curl` | Sending a local webhook delivery |
 | `grpcurl` | Dispatching a Job by hand ([Section 8](#8-observe-one-job-execution)) |
 | `perl` with the core `Digest::SHA` module | Signing a local delivery from bash ([Section 7.1](#71-signed-local-delivery)); ships with Linux and macOS |
+| `openssl` | Generating the webhook secret from bash ([Section 4.2](#42-control-plane)) |
+| `uuidgen` | Generating a Job identifier in the bash dispatch ([Section 8](#8-observe-one-job-execution)); ships with macOS, and with the `util-linux` package on Linux, which minimal images can omit |
 
 No host PostgreSQL client is needed: every persistence check runs `psql`
 inside the `zeroyaml-postgres` container.
@@ -76,8 +78,8 @@ inside the `zeroyaml-postgres` container.
 PowerShell blocks are for Windows and run unchanged on Windows PowerShell 5.1
 and PowerShell 7. Bash blocks have been executed only under Git Bash on
 Windows. They have not been run on Linux or macOS, where `openssl`, `curl`,
-`mktemp`, `date`, `sed`, and `grpcurl` can behave differently, so treat them as
-unverified on those platforms until a run there is recorded.
+`mktemp`, `perl`, `uuidgen`, and `grpcurl` can behave differently, so treat
+them as unverified on those platforms until a run there is recorded.
 
 Verify the toolchain before starting anything:
 
@@ -224,7 +226,13 @@ registry keeps the first instance registered under a `ZEROYAML_RUNNER_ID` for
 as long as the Control Plane process lives. A Runner restarted after an
 accepted registration is therefore rejected with an identity conflict and stays
 unavailable. Restart the Control Plane before restarting such a Runner, or
-start the Runner under a different `ZEROYAML_RUNNER_ID`.
+start the Runner under a different `ZEROYAML_RUNNER_ID`. Releasing or replacing
+a stale registration is tracked as
+[#271](https://github.com/MohamedMBG/ZeroYaml/issues/271).
+
+Startup registration is a single attempt with no retry, so a Runner whose
+attempt fails stays unavailable until it is restarted. Bounded retry is tracked
+as [#272](https://github.com/MohamedMBG/ZeroYaml/issues/272).
 
 `:50051` is the Runner's configurable default, not a fixed port. Override it
 with `ZEROYAML_RUNNER_GRPC_ADDRESS` and point the Control Plane at the new
@@ -620,7 +628,7 @@ the Control Plane `registration` tests ([Section 11](#11-automated-coverage)).
 | Schema applied | `docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml -c "\dt"` | `repository_connection` and Flyway's `flyway_schema_history` |
 | Migration recorded | `... -c "SELECT version, description, success FROM flyway_schema_history;"` | `1`, `success = t` |
 | Connection row | `... -c "SELECT provider, owner, name, status FROM repository_connection;"` | The row from [Section 6](#6-connect-a-repository) |
-| Connection survives a restart | `docker compose -f ./infra/compose.yaml down`, then `up -d postgres`, then repeat the row check | The row is still present, because `down` without `-v` removes the container and keeps the `postgres-data` volume. Not executed end to end; verify when [#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) lands |
+| Connection survives a restart | `docker compose -f ./infra/compose.yaml down`, then `up -d postgres`, then repeat the row check | The row is still present, because `down` without `-v` removes the container and keeps the `postgres-data` volume. Not executed yet; run once by hand and record the result |
 | Job state survives a restart | — | Not expected. Jobs are held in a process-local store and are lost on restart until [#28](https://github.com/MohamedMBG/ZeroYaml/issues/28) |
 
 The restart check recreates PostgreSQL, not the Control Plane, because the row
@@ -655,8 +663,8 @@ output is visible only in the Job container's own output.
 | Symptom | Cause | Action |
 | --- | --- | --- |
 | `Runner registration with the Control Plane at localhost:50052 failed - runner local-runner stays unavailable` | The Control Plane is not started, or listens elsewhere | Start the Control Plane first, or set `ZEROYAML_CONTROLPLANE_ADDRESS` to its `zeroyaml.registration.port` |
-| The same message ending in `DeadlineExceeded` while the Control Plane is up and listening | Resolving `localhost` took longer than `ZEROYAML_RUNNER_REGISTRATION_TIMEOUT` (default `5s`); observed on Windows | Set `ZEROYAML_CONTROLPLANE_ADDRESS` to `127.0.0.1:50052`, or raise the timeout |
-| `rejected registration for runner local-runner - identity conflict` | This `ZEROYAML_RUNNER_ID` is already registered under a different instance: another Runner is running, or this Runner was restarted after an accepted registration | Stop the other Runner if there is one, then restart the Control Plane to clear its in-memory registry, or give this Runner a distinct `ZEROYAML_RUNNER_ID` |
+| The same message ending in `DeadlineExceeded` while the Control Plane is up and listening | Resolving `localhost` took longer than `ZEROYAML_RUNNER_REGISTRATION_TIMEOUT` (default `5s`); observed on Windows | Set `ZEROYAML_CONTROLPLANE_ADDRESS` to `127.0.0.1:50052`, or raise the timeout; bounded retry is tracked as [#272](https://github.com/MohamedMBG/ZeroYaml/issues/272) |
+| `rejected registration for runner local-runner - identity conflict` | This `ZEROYAML_RUNNER_ID` is already registered under a different instance: another Runner is running, or this Runner was restarted after an accepted registration | Stop the other Runner if there is one, then restart the Control Plane to clear its in-memory registry, or give this Runner a distinct `ZEROYAML_RUNNER_ID`; a lasting fix is tracked as [#271](https://github.com/MohamedMBG/ZeroYaml/issues/271) |
 | Every dispatch answered `JOB_REJECTION_RUNNER_UNAVAILABLE`, message `runner status is ... and it is not accepting work` | Registration was not accepted, or Docker was unavailable at startup | Fix the cause, then restart the Runner; both checks run once at startup. If the earlier registration was accepted, restart the Control Plane first to avoid an identity conflict |
 | A dispatch answered `JOB_REJECTION_RUNNER_UNAVAILABLE`, message `runner is already running its maximum number of concurrent jobs` | Every execution slot is in use; `ZEROYAML_RUNNER_MAX_CONCURRENT_JOBS` defaults to `1` | Wait for the running Job's terminal report and dispatch again, or raise the limit. Do not restart the Runner: that cancels the healthy running Job |
 | A dispatch answered `JOB_REJECTION_RUNNER_UNAVAILABLE`, message `runner is shutting down and accepts no new jobs` | The Runner received `SIGINT` or `SIGTERM` and is draining | Dispatch again once the Runner has been started again |
