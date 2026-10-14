@@ -74,7 +74,10 @@ No host PostgreSQL client is needed: every persistence check runs `psql`
 inside the `zeroyaml-postgres` container.
 
 PowerShell blocks are for Windows and run unchanged on Windows PowerShell 5.1
-and PowerShell 7. Bash blocks are for Linux and macOS.
+and PowerShell 7. Bash blocks have been executed only under Git Bash on
+Windows. They have not been run on Linux or macOS, where `openssl`, `curl`,
+`mktemp`, `date`, `sed`, and `grpcurl` can behave differently, so treat them as
+unverified on those platforms until a run there is recorded.
 
 Verify the toolchain before starting anything:
 
@@ -397,6 +400,11 @@ acts on.
 
 ### 7.2 Delivery from GitHub itself
 
+> Not executed end to end; verify when
+> [#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) lands. Unlike
+> [Section 7.1](#71-signed-local-delivery), this procedure has not been run
+> against a real repository webhook.
+
 To drive the same endpoint from a real repository, expose port `8080` through a
 tunnel of your choice and configure the repository webhook with the tunnel URL
 plus `/webhooks/github`, content type `application/json`, the same secret as
@@ -612,7 +620,7 @@ the Control Plane `registration` tests ([Section 11](#11-automated-coverage)).
 | Schema applied | `docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml -c "\dt"` | `repository_connection` and Flyway's `flyway_schema_history` |
 | Migration recorded | `... -c "SELECT version, description, success FROM flyway_schema_history;"` | `1`, `success = t` |
 | Connection row | `... -c "SELECT provider, owner, name, status FROM repository_connection;"` | The row from [Section 6](#6-connect-a-repository) |
-| Connection survives a restart | `docker compose -f ./infra/compose.yaml down`, then `up -d postgres`, then repeat the row check | The row is still present, because `down` without `-v` removes the container and keeps the `postgres-data` volume |
+| Connection survives a restart | `docker compose -f ./infra/compose.yaml down`, then `up -d postgres`, then repeat the row check | The row is still present, because `down` without `-v` removes the container and keeps the `postgres-data` volume. Not executed end to end; verify when [#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) lands |
 | Job state survives a restart | — | Not expected. Jobs are held in a process-local store and are lost on restart until [#28](https://github.com/MohamedMBG/ZeroYaml/issues/28) |
 
 The restart check recreates PostgreSQL, not the Control Plane, because the row

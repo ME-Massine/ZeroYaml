@@ -1,6 +1,6 @@
 # ZeroYAML Project Progress
 
-Last updated: 2026-10-11 (Phase 2: local workflow documentation corrected after code review for issue #32)
+Last updated: 2026-10-14 (Phase 2: local workflow documentation marks unverified procedures for issue #32)
 
 Current phase: 2
 
@@ -94,7 +94,7 @@ The Runner Docker execution sandbox for issue #25 is merged into `main`. A Runne
 - One webhook secret is configured for the whole Control Plane. Per-repository secrets and rotation without downtime are not supported. Repository metadata persistence (#19) stores only the name of a secret per connection and nothing resolves it during verification; per-repository resolution and rotation need their own issue alongside Phase 6 security work.
 - A verified delivery can still be replayed, because deliveries are not deduplicated yet. Recording delivery identifiers under a unique constraint is tracked as issue #203.
 - `docs/local-development-workflow.md` documents two separately verified halves rather than one continuous push-to-execution run, because #30 and #31 are open. Its expected-state and automated-coverage sections therefore record what is wired and what is not, and they must be re-verified against the end-to-end test from #31 once it exists; acceptance criteria of #32 that depend on that test remain unmet until then.
-- The documented local workflow was executed by hand once, on Windows on 2026-10-11: startup, the signed delivery with its negative checks, and one succeeded and one failed Job execution. The bash blocks were not run on Linux or macOS, and the two halves were not run as one continuous scenario. No automated check asserts that the runbook's commands, log lines, or response codes still match the code, so a behavior change can leave it stale until the next manual run.
+- The documented local workflow was executed by hand once, on Windows on 2026-10-11: startup, the signed delivery with its negative checks, and one succeeded and one failed Job execution. The bash blocks ran under Git Bash on Windows only and were not run on Linux or macOS; the runbook states this next to its shell guidance. The delivery from GitHub itself (Section 7.2) and the persistence restart check were not executed and are marked as such in the runbook. The two halves were not run as one continuous scenario. No automated check asserts that the runbook's commands, log lines, or response codes still match the code, so a behavior change can leave it stale until the next manual run.
 - A Runner restarted after an accepted registration is rejected with an identity conflict until the Control Plane restarts, because each Runner process generates a new instance identifier and the in-memory registry never releases the earlier one. The runbook documents the workaround; releasing or replacing a stale registration needs its own issue.
 - The Runner's single startup registration attempt can exceed its `5s` default bound when resolving `localhost` is slow, which was observed on Windows and leaves the Runner unavailable. The runbook documents the `127.0.0.1` workaround; no retry exists for the startup registration.
 
