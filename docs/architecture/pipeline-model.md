@@ -24,7 +24,7 @@ types live in `io.zeroyaml.controlplane.domain.pipeline`.
 | Steps | Ordered `List<PipelineStep>`, at least one and at most 50 |
 | Step identity | `PipelineStep.name`, unique within the pipeline |
 | Step execution | The Job model's `ExecutionDefinition`: argument list plus working directory |
-| Outcome | `PipelineOutcome`: a `PipelineStatus` and, for a failed pipeline, a `PipelineFailure` |
+| Outcome | `PipelineOutcome`: a `PipelineStatus` plus the `PipelineFailure` of a failed pipeline or the cancelled step of a cancelled one |
 
 A step reuses `ExecutionDefinition` and a pipeline reuses `RepositoryReference`,
 so a step becomes a Job without translation: the pipeline's `source()` plus the
@@ -70,14 +70,21 @@ keys on identity alone must use `PipelineId`.
 cancelled maps to a pipeline state without a fabricated failure.
 `PipelineFailure` records the name of the failed step and reuses `JobFailure`
 for its stable failure code, safe diagnostic message, and optional exit code. An
-absent exit code stays absent rather than becoming a successful zero. The step
-name follows the same format as `PipelineStep`.
+absent exit code stays absent rather than becoming a successful zero.
 
-`PipelineOutcome` owns the consistency between a pipeline, its status, and its
-failure: a failure is present exactly when the status is `FAILED`, and it must
-name a step of that pipeline. Any other combination is rejected with
-`IllegalArgumentException`. These are value types only. The rules that move a
-pipeline between states belong to the Phase 3 pipeline lifecycle work.
+`PipelineOutcome` owns the consistency between a pipeline, its status, and the
+step that ended it. Its factories are the only way to create one:
+
+- `of(pipeline, status)` accepts `PENDING`, `RUNNING`, or `SUCCEEDED`.
+- `failed(pipeline, failure)` records a `PipelineFailure`.
+- `cancelled(pipeline, stepName)` records the step whose Job was cancelled.
+
+A failed or cancelled step must belong to that pipeline, which also guarantees
+it follows the `PipelineStep` name format. Any other combination is rejected
+with `IllegalArgumentException`. An outcome keeps only the `PipelineId`, so
+comparing or storing it never walks the plan. These are value types only. The
+rules that move a pipeline between states belong to the Phase 3 pipeline
+lifecycle work.
 
 ## Out of scope
 

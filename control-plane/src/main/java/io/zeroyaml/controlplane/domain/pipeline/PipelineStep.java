@@ -29,7 +29,7 @@ public record PipelineStep(String name, ExecutionDefinition execution) {
 		Objects.requireNonNull(execution, "execution must not be null");
 	}
 
-	static String requireValidName(String name) {
+	private static String requireValidName(String name) {
 		if (name == null || name.length() > MAX_NAME_LENGTH || !NAME_FORMAT.matcher(name).matches()) {
 			throw new IllegalArgumentException(
 					"name must be 1 to " + MAX_NAME_LENGTH + " lowercase letters, digits, '.', '_' or '-', "

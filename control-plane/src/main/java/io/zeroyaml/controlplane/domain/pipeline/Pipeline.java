@@ -22,7 +22,7 @@ import io.zeroyaml.controlplane.domain.job.RepositoryReference;
  * are equal only when identity, source, and steps all match.</p>
  *
  * <p>Construction is the validation point. A pipeline with no steps, more than
- * {@value #MAX_STEPS} steps, or two steps with the same name is rejected with an
+ * 50 steps, or two steps with the same name is rejected with an
  * {@link IllegalArgumentException}, and a missing step with a
  * {@link NullPointerException}, so an existing instance is always executable.</p>
  *
@@ -39,6 +39,8 @@ public record Pipeline(PipelineId id, RepositoryReference source, List<PipelineS
 		Objects.requireNonNull(id, "id must not be null");
 		Objects.requireNonNull(source, "source must not be null");
 		Objects.requireNonNull(steps, "steps must not be null");
+		// Copy first so the checks below see exactly the stored list; copyOf also rejects null steps.
+		steps = List.copyOf(steps);
 		if (steps.isEmpty()) {
 			throw new IllegalArgumentException("steps must contain at least one step");
 		}
@@ -47,11 +49,9 @@ public record Pipeline(PipelineId id, RepositoryReference source, List<PipelineS
 		}
 		var names = new HashSet<String>();
 		for (var step : steps) {
-			Objects.requireNonNull(step, "steps must not contain null");
 			if (!names.add(step.name())) {
 				throw new IllegalArgumentException("step names must be unique: " + step.name());
 			}
 		}
-		steps = List.copyOf(steps);
 	}
 }

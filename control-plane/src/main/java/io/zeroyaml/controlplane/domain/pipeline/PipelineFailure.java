@@ -7,8 +7,8 @@ import io.zeroyaml.controlplane.domain.job.JobFailure;
 /**
  * Safe, structured reason a pipeline ended as {@link PipelineStatus#FAILED}.
  *
- * <p>The step name follows {@link PipelineStep} naming rules.
- * {@link PipelineOutcome} checks that it names a step of its pipeline.</p>
+ * <p>{@link PipelineOutcome#failed} checks that the step name belongs to the
+ * pipeline, which also guarantees it follows {@link PipelineStep} naming rules.</p>
  *
  * @param stepName name of the step that failed
  * @param failure Job failure details, including the exit code when reported
@@ -16,7 +16,7 @@ import io.zeroyaml.controlplane.domain.job.JobFailure;
 public record PipelineFailure(String stepName, JobFailure failure) {
 
 	public PipelineFailure {
-		stepName = PipelineStep.requireValidName(stepName);
+		Objects.requireNonNull(stepName, "stepName must not be null");
 		Objects.requireNonNull(failure, "failure must not be null");
 	}
 }

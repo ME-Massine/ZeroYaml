@@ -31,9 +31,9 @@ class PipelineFailureTest {
 	}
 
 	@Test
-	void appliesStepNameValidation() {
-		assertThrows(IllegalArgumentException.class,
-				() -> new PipelineFailure("Build", new JobFailure("STEP_FAILED", "failed")));
+	void rejectsMissingStepName() {
+		assertThrows(NullPointerException.class,
+				() -> new PipelineFailure(null, new JobFailure("STEP_FAILED", "failed")));
 	}
 
 	@Test
