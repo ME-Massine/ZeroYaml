@@ -68,7 +68,7 @@ class PipelineTest {
 	void rejectsNullStep() {
 		var steps = Arrays.asList(step("build", "make"), null);
 
-		assertThrows(IllegalArgumentException.class, () -> new Pipeline(PipelineId.newId(), SOURCE, steps));
+		assertThrows(NullPointerException.class, () -> new Pipeline(PipelineId.newId(), SOURCE, steps));
 	}
 
 	@Test
@@ -109,7 +109,7 @@ class PipelineTest {
 	}
 
 	@Test
-	void mapsEachStepOntoAJobWithoutTranslation() {
+	void stepsSupplyExactlyTheInputsOfJobCreation() {
 		var pipeline = new Pipeline(PipelineId.newId(), SOURCE,
 				List.of(step("build", "./mvnw", "package"), step("test", "./mvnw", "verify")));
 		var createdAt = Instant.parse("2026-09-24T10:00:00Z");

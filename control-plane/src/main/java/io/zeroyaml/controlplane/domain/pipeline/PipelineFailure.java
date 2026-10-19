@@ -7,8 +7,8 @@ import io.zeroyaml.controlplane.domain.job.JobFailure;
 /**
  * Safe, structured reason a pipeline ended as {@link PipelineStatus#FAILED}.
  *
- * <p>The step name follows {@link PipelineStep} naming rules. Correlating it
- * with a particular pipeline belongs to the application boundary.</p>
+ * <p>The step name follows {@link PipelineStep} naming rules.
+ * {@link PipelineOutcome} checks that it names a step of its pipeline.</p>
  *
  * @param stepName name of the step that failed
  * @param failure Job failure details, including the exit code when reported

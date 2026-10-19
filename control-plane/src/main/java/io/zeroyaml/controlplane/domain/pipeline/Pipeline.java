@@ -15,15 +15,16 @@ import io.zeroyaml.controlplane.domain.job.RepositoryReference;
  * a workflow language: there are no triggers, matrices, reusable workflows, secret
  * definitions, or deployment graphs.</p>
  *
- * <p>Ordering rules: steps run strictly one after another in the order given, and
- * that order is preserved exactly as supplied. Identity rules: a pipeline is
- * identified by its {@link PipelineId}, and a step by its name, which is unique
- * within the pipeline.</p>
+ * <p>Ordering rules: the plan orders steps one after another exactly as supplied;
+ * executing them in that order belongs to the application boundary. Identity
+ * rules: a pipeline is referenced by its {@link PipelineId}, and a step by its
+ * name, which is unique within the pipeline. As an immutable value, two instances
+ * are equal only when identity, source, and steps all match.</p>
  *
  * <p>Construction is the validation point. A pipeline with no steps, more than
- * {@value #MAX_STEPS} steps, a missing step, or two steps with the same name is
- * rejected with an {@link IllegalArgumentException}, so an existing instance is
- * always executable.</p>
+ * {@value #MAX_STEPS} steps, or two steps with the same name is rejected with an
+ * {@link IllegalArgumentException}, and a missing step with a
+ * {@link NullPointerException}, so an existing instance is always executable.</p>
  *
  * @param id pipeline identity
  * @param source repository and immutable revision every step runs against
@@ -44,11 +45,9 @@ public record Pipeline(PipelineId id, RepositoryReference source, List<PipelineS
 		if (steps.size() > MAX_STEPS) {
 			throw new IllegalArgumentException("steps must not contain more than " + MAX_STEPS + " steps");
 		}
-		if (steps.stream().anyMatch(Objects::isNull)) {
-			throw new IllegalArgumentException("steps must not contain null");
-		}
 		var names = new HashSet<String>();
 		for (var step : steps) {
+			Objects.requireNonNull(step, "steps must not contain null");
 			if (!names.add(step.name())) {
 				throw new IllegalArgumentException("step names must be unique: " + step.name());
 			}

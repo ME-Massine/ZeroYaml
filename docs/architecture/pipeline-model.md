@@ -24,7 +24,7 @@ types live in `io.zeroyaml.controlplane.domain.pipeline`.
 | Steps | Ordered `List<PipelineStep>`, at least one and at most 50 |
 | Step identity | `PipelineStep.name`, unique within the pipeline |
 | Step execution | The Job model's `ExecutionDefinition`: argument list plus working directory |
-| Outcome | `PipelineStatus` and, for a failed pipeline, `PipelineFailure` |
+| Outcome | `PipelineOutcome`: a `PipelineStatus` and, for a failed pipeline, a `PipelineFailure` |
 
 A step reuses `ExecutionDefinition` and a pipeline reuses `RepositoryReference`,
 so a step becomes a Job without translation: the pipeline's `source()` plus the
@@ -44,7 +44,7 @@ object). An existing `Pipeline` is therefore always executable.
 - A pipeline must have an identity, a source, and at least one step.
 - A pipeline must not have more than 50 steps, which keeps the Jobs created from
   it finite.
-- A pipeline must not contain a missing step.
+- A pipeline must not contain a missing step (`NullPointerException`).
 - Step names must be unique. The rejection message names the duplicate.
 - A step name is 1 to 64 characters of lowercase letters, digits, `.`, `_`, and
   `-`, starting and ending with a letter or digit. Names are never trimmed or
@@ -54,25 +54,30 @@ object). An existing `Pipeline` is therefore always executable.
 
 ## Ordering and identity
 
-The plan orders steps strictly one after another as supplied; executing that plan
-belongs to the application boundary, not this model. The order
-is preserved exactly: it is never sorted by name and never reordered. The
-supplied list is copied, so a later change to it cannot alter the pipeline, and
-the exposed list is unmodifiable. A pipeline is identified by its `PipelineId`
-and a step by its name within that pipeline.
+The plan orders steps one after another as supplied; executing them in that
+order belongs to the application boundary, not this model. The order is
+preserved exactly: it is never sorted by name and never reordered. The supplied
+list is copied, so a later change to it cannot alter the pipeline, and the
+exposed list is unmodifiable. A pipeline is referenced by its `PipelineId` and a
+step by its name within that pipeline. `Pipeline` is an immutable value, so two
+instances are equal only when identity, source, and steps all match; code that
+keys on identity alone must use `PipelineId`.
 
 ## Status and failure
 
-`PipelineStatus` is `PENDING`, `RUNNING`, `SUCCEEDED`, or `FAILED`; the last two
-are terminal. `PipelineFailure` records the name of the failed step and reuses
-`JobFailure` for its stable failure code, safe diagnostic message, and optional
-exit code. An absent exit code stays absent rather than becoming a successful
-zero. The step name follows the same format as `PipelineStep`; matching it to a
-step in the pipeline belongs to Job creation and correlation in #23.
-These are value types only. The rules that move a pipeline between states,
-including cancellation, belong to the Phase 3 pipeline lifecycle work. A
-cancelled Job has no pipeline status mapping in this model; consumers must
-define that mapping when lifecycle orchestration is introduced.
+`PipelineStatus` is `PENDING`, `RUNNING`, `SUCCEEDED`, `FAILED`, or
+`CANCELLED`. `CANCELLED` mirrors the terminal Job state, so a step whose Job was
+cancelled maps to a pipeline state without a fabricated failure.
+`PipelineFailure` records the name of the failed step and reuses `JobFailure`
+for its stable failure code, safe diagnostic message, and optional exit code. An
+absent exit code stays absent rather than becoming a successful zero. The step
+name follows the same format as `PipelineStep`.
+
+`PipelineOutcome` owns the consistency between a pipeline, its status, and its
+failure: a failure is present exactly when the status is `FAILED`, and it must
+name a step of that pipeline. Any other combination is rejected with
+`IllegalArgumentException`. These are value types only. The rules that move a
+pipeline between states belong to the Phase 3 pipeline lifecycle work.
 
 ## Out of scope
 

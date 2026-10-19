@@ -6,9 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.NullAndEmptySource;
-import org.junit.jupiter.params.provider.ValueSource;
 
 import io.zeroyaml.controlplane.domain.job.JobFailure;
 
@@ -33,21 +30,10 @@ class PipelineFailureTest {
 		assertTrue(failure.failure().exit().isEmpty());
 	}
 
-	@ParameterizedTest
-	@NullAndEmptySource
-	@ValueSource(strings = { " ", "Build", "-build", "build-", "build step", "build\n", "a/b" })
-	void rejectsStepNamesOutsideTheStepFormat(String name) {
-		assertThrows(IllegalArgumentException.class,
-				() -> new PipelineFailure(name, new JobFailure("STEP_FAILED", "failed")));
-	}
-
 	@Test
-	void acceptsMaximumStepNameLengthAndRejectsOneMore() {
-		var jobFailure = new JobFailure("STEP_FAILED", "failed");
-
-		assertEquals(64, new PipelineFailure("a".repeat(64), jobFailure).stepName().length());
+	void appliesStepNameValidation() {
 		assertThrows(IllegalArgumentException.class,
-				() -> new PipelineFailure("a".repeat(65), jobFailure));
+				() -> new PipelineFailure("Build", new JobFailure("STEP_FAILED", "failed")));
 	}
 
 	@Test
