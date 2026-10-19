@@ -1,6 +1,6 @@
 # ZeroYAML Project Progress
 
-Last updated: 2026-10-10 (Phase 2: minimal healthy Runner selection proposed for issue #24, revised after review)
+Last updated: 2026-10-19 (Phase 2: minimal healthy Runner selection proposed for issue #24, revised after review)
 
 Current phase: 2
 
@@ -98,7 +98,7 @@ Minimal healthy Runner selection for issue #24 is implemented locally on a task 
 - One webhook secret is configured for the whole Control Plane. Per-repository secrets and rotation without downtime are not supported; they belong with repository metadata persistence (#19) and Phase 6 security work.
 - A verified delivery can still be replayed, because deliveries are not deduplicated yet. Recording delivery identifiers under a unique constraint is tracked as issue #203.
 
-- Runner selection (#24) is stateless and takes the smallest `runnerId` among available Runners, so it neither balances load nor reserves a Runner: while that Runner stays available it receives all work, and concurrent callers can be handed the same Runner. A Runner whose execution slots are full still reports that it accepts work, rejects the dispatch as unavailable, and is offered again. There is also no retry loop; a blocked Job waits until a caller asks again. Capacity, leases, and queueing are later scheduling work.
+- Runner selection (#24) is stateless and takes the smallest `runnerId` among available Runners, so it neither balances load nor reserves a Runner: while that Runner stays available it receives all work, and concurrent callers can be handed the same Runner. A Runner whose execution slots are full still reports that it accepts work, rejects the dispatch as unavailable, and is offered again. A Runner that is shutting down does not report `DRAINING`; it stops heartbeating and stays selectable until the heartbeat timeout elapses. There is also no retry loop; a blocked Job waits until a caller asks again. Capacity, leases, and queueing are later scheduling work.
 - The Control Plane reaches Runners through one configured address and the registry stores no per-Runner endpoint. With several Runners, a dispatch for a Runner other than the one behind that address is declined as `JOB_REJECTION_NOT_TARGET_RUNNER` instead of delivered, so multi-Runner dispatch needs per-Runner routing first.
 - A Runner evicted from the registry while it is still running (unreachable for longer than the heartbeat timeout plus `zeroyaml.registration.unavailable-retention`) is answered `HEARTBEAT_UNKNOWN_RUNNER` and does not re-register on its own, so it stays unselectable until restarted. The registry has no upper bound on concurrently live Runners; registration is unauthenticated until Phase 6.
 - The `runner.v1` additions for #24 are wire-compatible in both directions, but a Runner built before them is never selected because it reports no availability in its heartbeat.

@@ -19,8 +19,8 @@ import io.zeroyaml.controlplane.registration.RunnerRegistry;
  * {@link RunnerRegistry#availableRunners()} lists it: its heartbeat is recent,
  * and that heartbeat reported the Runner ready and accepting work. A Runner
  * that is alive but cannot execute, for example one without a Docker daemon
- * or one that is draining, is therefore never selected and cannot keep Jobs
- * away from a Runner that can run them.
+ * or one that reports it is draining, is therefore never selected and cannot
+ * keep Jobs away from a Runner that can run them.
  *
  * <p>{@code runnerId} is the registry key and therefore unique, so the
  * ordering is total and the same registry state always yields the same

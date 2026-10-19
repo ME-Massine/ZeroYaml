@@ -94,7 +94,8 @@ demand rather than through a background sweep:
   `zeroyaml.registration.heartbeat-timeout` (default `15s`).
 - `UNAVAILABLE`: no registration or heartbeat was recorded within the timeout.
   The next acknowledged heartbeat makes the same registry entry `HEALTHY`
-  again; recovery never creates a duplicate entry.
+  again, unless the entry was evicted first (see below); recovery never
+  creates a duplicate entry.
 - `UNKNOWN`: no Runner is registered under that `runner_id`, either because
   none ever registered or because its entry was evicted.
 

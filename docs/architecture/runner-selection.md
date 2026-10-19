@@ -28,7 +28,7 @@ registration, so it becomes selectable without waiting a heartbeat interval.
 Two consequences follow:
 
 - A Runner that is alive but cannot execute, such as one without a Docker
-  daemon or one that is draining, is never selected. It cannot keep Jobs away
+  daemon or one that reports `DRAINING`, is never selected. It cannot keep Jobs away
   from a Runner that can run them, even when its `runnerId` sorts first.
 - A Runner that does not report `status` in its heartbeat (one built before the
   field existed) keeps the availability the registry already holds. For such a
@@ -88,7 +88,8 @@ that it started, as described in the [Core Job Model](./job-model.md).
 There is no queue, retry timer, or background loop in this version. Retrying is the
 caller's choice: it asks again later, and the next call sees the registry's state
 at that time. A Runner that recovers its heartbeat becomes selectable again
-without a new registration.
+without a new registration, as long as its entry was not evicted in the
+meantime (see [Limits](#limits)).
 
 ## Registry size
 
@@ -111,6 +112,11 @@ sending heartbeats is never evicted.
   readiness and Docker only; it declines the dispatch with
   `JOB_REJECTION_RUNNER_UNAVAILABLE`, and the stateless selector offers the same
   Runner again. Excluding a Runner after a rejection needs capacity tracking.
+- The Runner reports the `status` and `accepting_work` it settled on at startup
+  and does not report `DRAINING` when it shuts down; its heartbeat loop simply
+  stops. A stopping Runner therefore stays selectable until the heartbeat
+  timeout elapses, and a dispatch in that window fails through the existing
+  rejection or transport-failure handling.
 - The Control Plane still reaches Runners through one configured address
   (`zeroyaml.runner.*`), and the registry stores no per-Runner endpoint. With
   several Runners, a dispatch to a Runner other than the one behind that address
