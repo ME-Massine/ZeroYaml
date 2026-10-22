@@ -3,7 +3,7 @@
 # CodeRabbit reviews every pull request against the ZeroYAML working agreement in
 # CLAUDE.md. It advises only. The merge gate stays with the required GitHub
 # checks (runner, control-plane, progress-file, phase-gate, secret-scan,
-# static-analysis) and the two approving human reviews, so every pre-merge check
+# static-analysis) and the one approving human review, so every pre-merge check
 # below runs in warning mode and the request-changes workflow stays off.
 
 language: en-US

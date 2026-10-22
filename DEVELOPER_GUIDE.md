@@ -450,6 +450,14 @@ docs/
 
 Long-form technical documentation belongs here.
 
+The [Local End-to-End Development Workflow](./docs/local-development-workflow.md)
+is the task-ordered runbook for this guide: it sequences the startup of
+infrastructure, Control Plane, and Runner, reproduces the supported signed
+GitHub `push` scenario, states the expected states and persistence checks, and
+collects troubleshooting for the webhook, gRPC, Docker, and PostgreSQL
+boundaries. This guide stays the reference for individual settings and
+contracts.
+
 Code explains **how the current implementation works**.
 
 Documentation should also explain **why architectural decisions were made**.
@@ -468,6 +476,7 @@ This directory is for system architecture documentation.
 Start with the [Phase 1 architecture and operating contract](./docs/architecture/phase-1-overview.md),
 then use the focused [Runner identity and registration contract](./docs/architecture/runner-identity.md),
 [Core Job Model](./docs/architecture/job-model.md),
+[Minimal pipeline model](./docs/architecture/pipeline-model.md),
 [RunJob dispatch contract](./docs/architecture/run-job-contract.md), and
 [Job status reporting contract](./docs/architecture/job-status-contract.md)
 references for the implemented foundation and its explicit integration limits. The
@@ -932,6 +941,12 @@ To generate the Control Plane gRPC client and verify its Ping integration path, 
 ```
 
 The focused Ping test uses an in-process Runner and does not require a separately running Runner process.
+
+Then bring the platform up and verify the available webhook and Runner
+execution paths separately by following the
+[Local End-to-End Development Workflow](./docs/local-development-workflow.md).
+It also records which steps of the push-to-execution chain are wired today and
+which remain open Phase 2 work.
 
 ---
 

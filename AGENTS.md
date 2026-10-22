@@ -205,7 +205,7 @@ Every proposed pull request must:
 - list the exact validation commands and results;
 - identify risks, compatibility concerns, and follow-up work;
 - pass `runner`, `control-plane`, `progress-file`, and `phase-gate` checks;
-- receive two approving reviews and resolve all review threads before merge;
+- receive one approving review and resolve all review threads before merge;
 - use squash merge unless the repository policy changes.
 
 Never recommend bypassing these requirements. An administrative bypass is for exceptional repository recovery, not normal delivery.
@@ -283,4 +283,4 @@ Local implementation is ready for user review only when:
 - no secrets or generated artifacts are included;
 - a clear handoff and exact user-run publishing commands are provided.
 
-Merge completion is reached only after the pull request passes all required checks, receives two approvals, resolves review feedback, and is merged by an authorized human.
+Merge completion is reached only after the pull request passes all required checks, receives one approval, resolves review feedback, and is merged by an authorized human.

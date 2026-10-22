@@ -21,4 +21,4 @@
 
 ## Review requirements
 
-This repository requires two approving reviewers before a pull request can merge.
+This repository requires one approving reviewer before a pull request can merge.
