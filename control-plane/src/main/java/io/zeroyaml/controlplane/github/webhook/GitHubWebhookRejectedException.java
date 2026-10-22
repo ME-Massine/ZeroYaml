@@ -5,8 +5,9 @@ import java.util.Objects;
 import org.springframework.http.HttpStatus;
 
 /**
- * A delivery whose envelope failed validation. It carries the HTTP status that
- * tells GitHub, and the operator reading the delivery log, what was wrong.
+ * A delivery whose envelope or supported payload failed validation. It carries
+ * the HTTP status that tells GitHub, and the operator reading the delivery log,
+ * what was wrong.
  */
 class GitHubWebhookRejectedException extends RuntimeException {
 
