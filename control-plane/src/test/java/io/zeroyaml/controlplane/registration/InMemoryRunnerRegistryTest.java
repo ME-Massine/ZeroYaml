@@ -3,6 +3,7 @@ package io.zeroyaml.controlplane.registration;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Clock;
@@ -196,6 +197,59 @@ class InMemoryRunnerRegistryTest {
 		var reRegistered = registry.register(runner("runner-1", "instance-1"));
 		assertEquals(RegistrationDecision.ALREADY_REGISTERED, reRegistered.decision());
 		assertEquals(registered.registrationId(), reRegistered.registrationId());
+	}
+
+	@Test
+	void listsNoAvailableRunnersWhenNothingIsRegistered() {
+		assertTrue(newRegistry(Instant.EPOCH).availableRunners().isEmpty());
+	}
+
+	@Test
+	void listsOnlyHealthyDockerCapableRunnersDespitePreRegistrationReadinessFlags() {
+		var clock = new MutableClock(Instant.EPOCH);
+		var registry = newRegistry(clock);
+		registry.register(dockerRunner("stale"));
+		clock.advance(HEARTBEAT_TIMEOUT.plusNanos(1));
+		registry.register(runner("docker-less", "instance-1"));
+		registry.register(dockerRunner("available"));
+
+		var available = registry.availableRunners();
+
+		assertEquals(List.of("available"), available.stream().map(entry -> entry.runner().runnerId()).toList());
+		assertEquals(RunnerState.UNAVAILABLE, available.getFirst().runner().state());
+		assertFalse(available.getFirst().runner().acceptingWork());
+	}
+
+	@Test
+	void includesTheTimeoutBoundaryAndExcludesTheNextInstant() {
+		var clock = new MutableClock(Instant.EPOCH);
+		var registry = newRegistry(clock);
+		registry.register(dockerRunner("runner-1"));
+		clock.advance(HEARTBEAT_TIMEOUT);
+
+		assertEquals(1, registry.availableRunners().size());
+
+		clock.advance(Duration.ofNanos(1));
+		assertTrue(registry.availableRunners().isEmpty());
+	}
+
+	@Test
+	void returnsAnImmutablePointInTimeSnapshot() {
+		var clock = new MutableClock(Instant.EPOCH);
+		var registry = newRegistry(clock);
+		registry.register(dockerRunner("runner-1"));
+		var snapshot = registry.availableRunners();
+
+		assertThrows(UnsupportedOperationException.class, snapshot::clear);
+		clock.advance(HEARTBEAT_TIMEOUT.plusNanos(1));
+
+		assertEquals(1, snapshot.size());
+		assertTrue(registry.availableRunners().isEmpty());
+	}
+
+	private static RunnerInfo dockerRunner(String runnerId) {
+		return new RunnerInfo(runnerId, "instance-1", "0.1.0", "runner.v1", RunnerState.UNAVAILABLE,
+				false, new RunnerCapabilities("linux", "amd64", true, List.of(), Map.of()));
 	}
 
 	private static InMemoryRunnerRegistry newRegistry(Instant instant) {

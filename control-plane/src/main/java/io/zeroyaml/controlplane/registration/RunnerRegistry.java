@@ -1,5 +1,7 @@
 package io.zeroyaml.controlplane.registration;
 
+import java.util.List;
+
 import io.zeroyaml.controlplane.runner.RunnerInfo;
 
 /**
@@ -28,4 +30,15 @@ public interface RunnerRegistry {
 	 * time elapsed since its last acknowledged registration or heartbeat.
 	 */
 	RunnerLiveness livenessOf(String runnerId);
+
+	/**
+	 * Returns an immutable snapshot of registered Runners with healthy liveness
+	 * and Docker available at startup, in no guaranteed order. Docker is probed
+	 * before registration; the registration state and accepting-work flag are
+	 * captured before registration is acknowledged and cannot describe readiness.
+	 *
+	 * <p>This is eligibility for selection only, not a reservation or a guarantee
+	 * of reachability or capacity when a caller eventually dispatches a Job.</p>
+	 */
+	List<RegisteredRunner> availableRunners();
 }
