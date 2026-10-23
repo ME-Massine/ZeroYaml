@@ -2,7 +2,6 @@ package io.zeroyaml.controlplane.runner;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.net.URI;
@@ -42,8 +41,6 @@ import org.junit.jupiter.api.Test;
  */
 class GrpcRunnerClientTest {
 
-	private static final RunnerAssignment TARGET = new RunnerAssignment("runner-dev-01", "instance-1");
-
 	private ManagedChannel channel;
 	private Server server;
 
@@ -67,7 +64,7 @@ class GrpcRunnerClientTest {
 		var client = startRunner(runnerService);
 		var job = newJob();
 
-		var result = client.dispatchJob(job, TARGET);
+		var result = client.dispatchJob(job);
 
 		assertEquals(JobDispatchOutcome.ACCEPTED, result.outcome());
 		assertEquals(job.id(), result.jobId());
@@ -88,53 +85,6 @@ class GrpcRunnerClientTest {
 		assertEquals("3af0394", request.getJob().getRepository().getRevision());
 		assertEquals(List.of("go", "test", "./..."), request.getJob().getExecution().getCommandList());
 		assertEquals("runner", request.getJob().getExecution().getWorkingDirectory());
-
-		// The dispatch names the selected Runner process so any other process declines it.
-		assertEquals("runner-dev-01", request.getTargetRunnerId());
-		assertEquals("instance-1", request.getTargetInstanceId());
-	}
-
-	@Test
-	void mapsADispatchDeclinedByAnotherProcessToNotTargetRunner() throws IOException {
-		var client = startRunner(new DispatchService(response -> response
-				.setAcceptance(JobAcceptance.JOB_REJECTED)
-				.setRejectionReason(io.zeroyaml.contracts.runner.v1.JobRejectionReason.JOB_REJECTION_NOT_TARGET_RUNNER)
-				.setMessage("dispatch names a different runner process as its target")
-				.setRunnerId("runner-dev-02")
-				.setInstanceId("instance-9")));
-
-		var result = client.dispatchJob(newJob(), TARGET);
-
-		assertEquals(JobDispatchOutcome.REJECTED, result.outcome());
-		assertEquals(JobRejectionReason.NOT_TARGET_RUNNER, result.rejection().orElseThrow());
-		assertEquals(
-				new RunnerAssignment("runner-dev-02", "instance-9"),
-				result.runnerAssignment().orElseThrow()
-		);
-	}
-
-	@Test
-	void rejectsAnAcceptanceFromAProcessOtherThanTheTarget() throws IOException {
-		// A Runner that ignores the target must not be recorded as the executing process.
-		var client = startRunner(new DispatchService(response -> response
-				.setAcceptance(JobAcceptance.JOB_ACCEPTED)
-				.setRunnerId("runner-dev-01")
-				.setInstanceId("instance-after-restart")));
-
-		var job = newJob();
-
-		var failure = assertThrows(IllegalStateException.class, () -> client.dispatchJob(job, TARGET));
-
-		assertTrue(failure.getMessage().contains("instance-after-restart"));
-	}
-
-	@Test
-	void rejectsADispatchWithoutATarget() throws IOException {
-		var client = startRunner(new DispatchService(response -> response.setAcceptance(JobAcceptance.JOB_ACCEPTED)));
-
-		var job = newJob();
-
-		assertThrows(NullPointerException.class, () -> client.dispatchJob(job, null));
 	}
 
 	@Test
@@ -146,7 +96,7 @@ class GrpcRunnerClientTest {
 				.setRunnerId("runner-dev-01")
 				.setInstanceId("instance-1")));
 
-		var result = client.dispatchJob(newJob(), TARGET);
+		var result = client.dispatchJob(newJob());
 
 		assertEquals(JobDispatchOutcome.REJECTED, result.outcome());
 		assertEquals(JobRejectionReason.RUNNER_UNAVAILABLE, result.rejection().orElseThrow());
@@ -163,7 +113,7 @@ class GrpcRunnerClientTest {
 				.setAcceptance(JobAcceptance.JOB_REJECTED)
 				.setMessage("declined")));
 
-		var result = client.dispatchJob(newJob(), TARGET);
+		var result = client.dispatchJob(newJob());
 
 		assertEquals(JobDispatchOutcome.REJECTED, result.outcome());
 		assertEquals(JobRejectionReason.UNKNOWN, result.rejection().orElseThrow());
@@ -177,7 +127,7 @@ class GrpcRunnerClientTest {
 				.asRuntimeException()));
 
 		var job = newJob();
-		var exception = assertThrows(RunnerClientException.class, () -> client.dispatchJob(job, TARGET));
+		var exception = assertThrows(RunnerClientException.class, () -> client.dispatchJob(job));
 
 		assertEquals(Status.Code.INVALID_ARGUMENT, exception.getStatusCode());
 	}
@@ -191,7 +141,7 @@ class GrpcRunnerClientTest {
 		var client = new GrpcRunnerClient(channel, Duration.ofSeconds(1), Duration.ofSeconds(1));
 		var job = newJob();
 
-		var exception = assertThrows(RunnerClientException.class, () -> client.dispatchJob(job, TARGET));
+		var exception = assertThrows(RunnerClientException.class, () -> client.dispatchJob(job));
 
 		assertEquals(Status.Code.UNAVAILABLE, exception.getStatusCode());
 	}
@@ -206,7 +156,7 @@ class GrpcRunnerClientTest {
 
 		var job = newJob();
 
-		assertThrows(IllegalStateException.class, () -> client.dispatchJob(job, TARGET));
+		assertThrows(IllegalStateException.class, () -> client.dispatchJob(job));
 	}
 
 	@Test
@@ -215,7 +165,7 @@ class GrpcRunnerClientTest {
 
 		var job = newJob();
 
-		assertThrows(IllegalStateException.class, () -> client.dispatchJob(job, TARGET));
+		assertThrows(IllegalStateException.class, () -> client.dispatchJob(job));
 	}
 
 	@Test

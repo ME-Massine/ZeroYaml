@@ -94,19 +94,6 @@ message RegisterRunnerResponse {
 message HeartbeatRequest {
   string runner_id = 1;
   string instance_id = 2;
-
-  // Lifecycle state of the Runner at the time of the heartbeat. Registration
-  // happens before a Runner finishes its startup checks, so the heartbeat is
-  // what keeps the Control Plane's view of availability current.
-  //
-  // RUNNER_STATUS_UNSPECIFIED means the sender predates this field. The
-  // Control Plane then records liveness only and keeps the availability it
-  // already holds, ignoring accepting_work.
-  RunnerStatus status = 3;
-
-  // Whether the Runner takes a dispatch right now. Read only together with a
-  // specified status, because an absent value is indistinguishable from false.
-  bool accepting_work = 4;
 }
 
 message HeartbeatResponse {
@@ -135,15 +122,6 @@ message RunJobRequest {
   string protocol_version = 1;
 
   JobSpecification job = 2;
-
-  // Runner process the Control Plane selected for this Job. A Runner whose own
-  // identity differs declines with JOB_REJECTION_NOT_TARGET_RUNNER, so a
-  // dispatch that reaches another process is never executed there.
-  //
-  // Both fields are set together. Both empty means the caller predates these
-  // fields and names no target; the Runner then applies no target check.
-  string target_runner_id = 3;
-  string target_instance_id = 4;
 }
 
 // JobSpecification is the minimum executable description of one Job. Additional
@@ -236,11 +214,6 @@ enum JobRejectionReason {
   // The Runner is not accepting work, for example while starting or draining.
   // The Control Plane may dispatch the Job to another Runner.
   JOB_REJECTION_RUNNER_UNAVAILABLE = 2;
-
-  // The dispatch names a different Runner process as its target. This process
-  // was not selected for the Job, so the Control Plane must not record it as
-  // the executing Runner.
-  JOB_REJECTION_NOT_TARGET_RUNNER = 3;
 }
 
 // ReportJobStatusRequest carries one observation made by the Runner process

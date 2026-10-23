@@ -108,8 +108,37 @@ A verified delivery with a supported event is passed to
   than 256 characters are dropped.
 
 The handler runs on the request thread before GitHub receives its answer, so an
-implementation must return quickly. The current handler only writes an audit
-log record. Event normalization (#20) is implemented behind this boundary.
+implementation must return quickly. It must not start pipeline work
+synchronously.
+
+## Push event normalization
+
+The accepted `push` handler parses the already-verified raw body into a
+`RepositoryPushEvent` for branch pushes that point to a commit. The event
+contains:
+
+- repository identity from `repository.owner.login` and `repository.name`;
+- a validated branch name from `ref`, after removing the `refs/heads/` prefix;
+- the commit SHA from `after`;
+- the GitHub delivery identifier from `X-GitHub-Delivery`;
+- the tip commit timestamp from `head_commit.timestamp`.
+
+The field mapping follows GitHub's [push webhook payload](https://docs.github.com/en/webhooks/webhook-events-and-payloads#push).
+
+The event time is the timestamp supplied for the tip commit, not the Control
+Plane's receipt time. This makes the normalized value stable when GitHub
+redelivers the same delivery. Required fields are validated at the webhook
+boundary; a malformed supported push receives `400 Bad Request` with a
+field-specific message that does not echo payload data.
+
+Valid tag pushes and branch deletions are acknowledged but do not produce a
+build event because they do not identify a buildable branch commit. Other refs
+are rejected with an actionable validation message.
+
+Normalization is a pure mapping. The same push body and delivery ID produce an
+equal event, and the delivery ID remains the idempotency key for downstream
+consumers. This boundary does not suppress repeated HTTP deliveries or persist
+processed IDs; durable duplicate suppression is tracked separately in #203.
 
 ## Configuration
 
@@ -134,10 +163,8 @@ secret.
 
 ## Current limits
 
-- Verified deliveries are not processed further until event normalization (#20)
-  exists.
-- Redeliveries are not deduplicated; the delivery identifier is preserved so a
-  downstream consumer can deduplicate. Recording delivery identifiers under a
-  unique constraint is tracked as #203.
+- A repeated verified delivery is normalized to the same event when its body
+  and delivery ID match. Redeliveries are not suppressed at ingress; recording
+  delivery identifiers under a unique constraint is tracked as #203.
 - One secret is configured for the whole Control Plane. Per-repository secrets
   and secret rotation are not supported yet.

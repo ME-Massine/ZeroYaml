@@ -482,9 +482,7 @@ then use the focused [Runner identity and registration contract](./docs/architec
 references for the implemented foundation and its explicit integration limits. The
 [Repository Connection Model](./docs/architecture/repository-connection-model.md)
 reference covers how the Control Plane identifies connected repositories and
-references webhook secrets without storing them. The
-[Runner selection](./docs/architecture/runner-selection.md) reference covers how
-the Control Plane chooses a healthy Runner for a queued Job.
+references webhook secrets without storing them.
 
 Examples:
 
@@ -640,7 +638,6 @@ Runner is configured with a single Control Plane address:
 | --- | --- | --- |
 | `zeroyaml.registration.port` | `50052` | Port for `RunnerRegistrationService` and `JobExecutionStatusService` |
 | `zeroyaml.registration.heartbeat-timeout` | `15s` | Time without a heartbeat before a Runner is reported `UNAVAILABLE` |
-| `zeroyaml.registration.unavailable-retention` | `10m` | Time an `UNAVAILABLE` Runner stays registered before its entry is evicted and its `runner_id` can be registered by a new instance |
 
 The setting keeps its `zeroyaml.registration` prefix so deployed configuration
 and Runner environment variables stay valid as services are added to the

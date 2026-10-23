@@ -106,104 +106,6 @@ func TestRunJobRejectsAnUnsupportedProtocolVersion(t *testing.T) {
 	}
 }
 
-// TestRunJobAcceptsADispatchThatTargetsThisProcess covers the dispatch a
-// Control Plane sends after selecting this Runner process.
-func TestRunJobAcceptsADispatchThatTargetsThisProcess(t *testing.T) {
-	identity := newAcceptingTestIdentity(t)
-	jobs := &recordingJobSubmitter{}
-
-	request := newValidRunJobRequest()
-	request.TargetRunnerId = identity.RunnerID
-	request.TargetInstanceId = identity.InstanceID
-
-	response, err := New(identity, jobs, discardLogger()).RunJob(context.Background(), request)
-	if err != nil {
-		t.Fatalf("RunJob() returned an error: %v", err)
-	}
-
-	if response.GetAcceptance() != runnerv1.JobAcceptance_JOB_ACCEPTED {
-		t.Errorf("Acceptance = %s, want %s", response.GetAcceptance(), runnerv1.JobAcceptance_JOB_ACCEPTED)
-	}
-	if len(jobs.submitted) != 1 {
-		t.Errorf("submitted = %v, want exactly the dispatched job", jobs.submitted)
-	}
-}
-
-// TestRunJobRejectsADispatchThatTargetsAnotherProcess shows that the Control
-// Plane's selection is enforced at the Runner boundary: a Job addressed to a
-// different Runner, or to an earlier instance of this Runner, is declined and
-// never executed, even though this process is ready for work.
-func TestRunJobRejectsADispatchThatTargetsAnotherProcess(t *testing.T) {
-	identity := newAcceptingTestIdentity(t)
-
-	testCases := []struct {
-		name             string
-		targetRunnerID   string
-		targetInstanceID string
-	}{
-		{name: "another runner", targetRunnerID: "runner-other", targetInstanceID: identity.InstanceID},
-		{name: "another instance of this runner", targetRunnerID: identity.RunnerID, targetInstanceID: "instance-before-restart"},
-	}
-
-	for _, testCase := range testCases {
-		t.Run(testCase.name, func(t *testing.T) {
-			jobs := &recordingJobSubmitter{}
-			request := newValidRunJobRequest()
-			request.TargetRunnerId = testCase.targetRunnerID
-			request.TargetInstanceId = testCase.targetInstanceID
-
-			response, err := New(identity, jobs, discardLogger()).RunJob(context.Background(), request)
-			if err != nil {
-				t.Fatalf("RunJob() returned an error: %v", err)
-			}
-
-			if response.GetAcceptance() != runnerv1.JobAcceptance_JOB_REJECTED {
-				t.Errorf("Acceptance = %s, want %s", response.GetAcceptance(), runnerv1.JobAcceptance_JOB_REJECTED)
-			}
-			if response.GetRejectionReason() != runnerv1.JobRejectionReason_JOB_REJECTION_NOT_TARGET_RUNNER {
-				t.Errorf(
-					"RejectionReason = %s, want %s",
-					response.GetRejectionReason(),
-					runnerv1.JobRejectionReason_JOB_REJECTION_NOT_TARGET_RUNNER,
-				)
-			}
-			if response.GetRunnerId() != identity.RunnerID || response.GetInstanceId() != identity.InstanceID {
-				t.Errorf(
-					"answering process = %q/%q, want %q/%q",
-					response.GetRunnerId(), response.GetInstanceId(), identity.RunnerID, identity.InstanceID,
-				)
-			}
-			if len(jobs.submitted) != 0 {
-				t.Errorf("submitted = %v, want nothing for a dispatch addressed elsewhere", jobs.submitted)
-			}
-		})
-	}
-}
-
-// TestRunJobReportsNotTargetBeforeRunnerState shows that a Runner that is not
-// accepting work still answers a misaddressed dispatch as not-target, so the
-// Control Plane never mistakes a routing defect for an unavailable Runner.
-func TestRunJobReportsNotTargetBeforeRunnerState(t *testing.T) {
-	identity := newTestIdentity(t)
-
-	request := newValidRunJobRequest()
-	request.TargetRunnerId = "runner-other"
-	request.TargetInstanceId = "instance-other"
-
-	response, err := New(identity, &recordingJobSubmitter{}, discardLogger()).RunJob(context.Background(), request)
-	if err != nil {
-		t.Fatalf("RunJob() returned an error: %v", err)
-	}
-
-	if response.GetRejectionReason() != runnerv1.JobRejectionReason_JOB_REJECTION_NOT_TARGET_RUNNER {
-		t.Errorf(
-			"RejectionReason = %s, want %s",
-			response.GetRejectionReason(),
-			runnerv1.JobRejectionReason_JOB_REJECTION_NOT_TARGET_RUNNER,
-		)
-	}
-}
-
 // TestRunJobRejectsRequestsThatViolateTheContract covers caller defects. Each
 // case is a request no compliant Control Plane sends, so the Runner answers
 // INVALID_ARGUMENT instead of producing an acknowledgment that would suggest
@@ -227,18 +129,6 @@ func TestRunJobRejectsRequestsThatViolateTheContract(t *testing.T) {
 			name: "absent job",
 			request: mutateRunJobRequest(func(request *runnerv1.RunJobRequest) {
 				request.Job = nil
-			}),
-		},
-		{
-			name: "target runner without a target instance",
-			request: mutateRunJobRequest(func(request *runnerv1.RunJobRequest) {
-				request.TargetRunnerId = "runner-dev-01"
-			}),
-		},
-		{
-			name: "target instance without a target runner",
-			request: mutateRunJobRequest(func(request *runnerv1.RunJobRequest) {
-				request.TargetInstanceId = "instance-1"
 			}),
 		},
 		{

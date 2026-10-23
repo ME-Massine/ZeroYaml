@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"sync"
 	"testing"
 	"time"
 
@@ -55,64 +54,6 @@ func TestHeartbeatReturnsUnknownRunnerDecision(t *testing.T) {
 	}
 }
 
-// TestHeartbeatReportsTheRunnerAvailability shows that every heartbeat carries
-// the Runner's current status and accepting-work flag next to its identity,
-// which is the only way the Control Plane learns them after registration.
-func TestHeartbeatReportsTheRunnerAvailability(t *testing.T) {
-	service := &fakeRegistrationService{
-		response: &runnerv1.HeartbeatResponse{Result: runnerv1.HeartbeatResult_HEARTBEAT_ACKNOWLEDGED},
-	}
-	dial, cleanup := startFakeControlPlane(t, service)
-	defer cleanup()
-
-	identity := newTestIdentity(t)
-	identity.Status = runneridentity.StatusReady
-	identity.AcceptingWork = true
-
-	if _, err := heartbeat(testContext(t), "bufconn", identity, dial); err != nil {
-		t.Fatalf("heartbeat() returned an error: %v", err)
-	}
-
-	request := service.lastRequest()
-	if request.GetRunnerId() != identity.RunnerID {
-		t.Errorf("RunnerId = %q, want %q", request.GetRunnerId(), identity.RunnerID)
-	}
-	if request.GetInstanceId() != identity.InstanceID {
-		t.Errorf("InstanceId = %q, want %q", request.GetInstanceId(), identity.InstanceID)
-	}
-	if request.GetStatus() != runnerv1.RunnerStatus_RUNNER_STATUS_READY {
-		t.Errorf("Status = %s, want %s", request.GetStatus(), runnerv1.RunnerStatus_RUNNER_STATUS_READY)
-	}
-	if !request.GetAcceptingWork() {
-		t.Error("AcceptingWork = false, want true")
-	}
-}
-
-// TestHeartbeatReportsARunnerThatDoesNotAcceptWork covers a Runner without a
-// verified Docker daemon: it stays alive but must not be offered work.
-func TestHeartbeatReportsARunnerThatDoesNotAcceptWork(t *testing.T) {
-	service := &fakeRegistrationService{
-		response: &runnerv1.HeartbeatResponse{Result: runnerv1.HeartbeatResult_HEARTBEAT_ACKNOWLEDGED},
-	}
-	dial, cleanup := startFakeControlPlane(t, service)
-	defer cleanup()
-
-	identity := newTestIdentity(t)
-	identity.Status = runneridentity.StatusReady
-
-	if _, err := heartbeat(testContext(t), "bufconn", identity, dial); err != nil {
-		t.Fatalf("heartbeat() returned an error: %v", err)
-	}
-
-	request := service.lastRequest()
-	if request.GetStatus() != runnerv1.RunnerStatus_RUNNER_STATUS_READY {
-		t.Errorf("Status = %s, want %s", request.GetStatus(), runnerv1.RunnerStatus_RUNNER_STATUS_READY)
-	}
-	if request.GetAcceptingWork() {
-		t.Error("AcceptingWork = true, want false")
-	}
-}
-
 // TestHeartbeatReturnsAnErrorWhenTheControlPlaneIsUnreachable shows that a
 // transport failure surfaces as an explicit error rather than a decision, so
 // a caller never treats an unreachable Control Plane as an acknowledged
@@ -156,32 +97,18 @@ func TestHeartbeatReturnsAnErrorWhenDialFails(t *testing.T) {
 }
 
 // fakeRegistrationService returns a fixed response for every Heartbeat call
-// it receives and keeps the most recent request for inspection.
+// it receives.
 type fakeRegistrationService struct {
 	runnerv1.UnimplementedRunnerRegistrationServiceServer
 
 	response *runnerv1.HeartbeatResponse
-
-	mu       sync.Mutex
-	received *runnerv1.HeartbeatRequest
 }
 
 func (s *fakeRegistrationService) Heartbeat(
 	ctx context.Context,
 	req *runnerv1.HeartbeatRequest,
 ) (*runnerv1.HeartbeatResponse, error) {
-	s.mu.Lock()
-	s.received = req
-	s.mu.Unlock()
-
 	return s.response, nil
-}
-
-func (s *fakeRegistrationService) lastRequest() *runnerv1.HeartbeatRequest {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.received
 }
 
 // startFakeControlPlane serves service over an in-memory listener and returns

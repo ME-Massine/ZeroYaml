@@ -195,11 +195,6 @@ class HealthyRunnerSelectorTest {
 		}
 
 		@Override
-		public HeartbeatOutcome heartbeat(String runnerId, String instanceId, RunnerState state, boolean acceptingWork) {
-			throw new UnsupportedOperationException("selection must not record heartbeats");
-		}
-
-		@Override
 		public RunnerLiveness livenessOf(String runnerId) {
 			throw new UnsupportedOperationException("selection must use availableRunners()");
 		}

@@ -33,14 +33,9 @@ func newRealTicker(interval time.Duration) Ticker {
 
 type sendFunc func(ctx context.Context, address string, identity runneridentity.Identity) (heartbeatclient.Result, error)
 
-// Run sends a heartbeat for identity to the Control Plane at address once
-// immediately and then every interval, each attempt bounded by timeout, until
-// ctx is done. It returns only when ctx is cancelled, so callers run it in its
-// own goroutine.
-//
-// The first heartbeat is not delayed by interval because it is the first
-// report of the Runner's post-registration status and accepting-work flag; the
-// Control Plane offers the Runner no work before it arrives.
+// Run sends a heartbeat for identity to the Control Plane at address every
+// interval, each attempt bounded by timeout, until ctx is done. It returns
+// only when ctx is cancelled, so callers run it in its own goroutine.
 func Run(
 	ctx context.Context,
 	address string,
@@ -64,8 +59,6 @@ func run(
 ) {
 	ticker := newTicker(interval)
 	defer ticker.Stop()
-
-	sendOnce(ctx, address, identity, timeout, logger, send)
 
 	for {
 		select {

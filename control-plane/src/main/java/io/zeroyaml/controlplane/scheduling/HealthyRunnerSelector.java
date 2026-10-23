@@ -16,11 +16,11 @@ import io.zeroyaml.controlplane.registration.RunnerRegistry;
  * lexicographically smallest {@code runnerId}.
  *
  * <p>Eligibility is the registry's decision. A Runner is eligible exactly when
- * {@link RunnerRegistry#availableRunners()} lists it: its heartbeat is recent,
- * and that heartbeat reported the Runner ready and accepting work. A Runner
- * that is alive but cannot execute, for example one without a Docker daemon
- * or one that reports it is draining, is therefore never selected and cannot
- * keep Jobs away from a Runner that can run them.
+ * {@link RunnerRegistry#availableRunners()} lists it: its liveness is healthy
+ * and its startup Docker probe succeeded. A Docker-less Runner therefore
+ * cannot keep Jobs away from a Docker-capable Runner. The registration's state
+ * and accepting-work flag predate the registration acknowledgment and are not
+ * used as readiness signals.
  *
  * <p>{@code runnerId} is the registry key and therefore unique, so the
  * ordering is total and the same registry state always yields the same
@@ -53,7 +53,7 @@ class HealthyRunnerSelector implements RunnerSelector {
 				.min(BY_RUNNER_ID)
 				.map(registered -> toSelectedOutcome(job, registered))
 				.orElseGet(() -> new RunnerSelectionOutcome.NoAvailableRunner(
-						job.id(), "No Runner is healthy and accepting work; Job " + job.id() + " stays queued"));
+						job.id(), "No healthy Docker-capable Runner is registered; Job " + job.id() + " stays queued"));
 	}
 
 	private static RunnerSelectionOutcome toSelectedOutcome(Job job, RegisteredRunner registered) {

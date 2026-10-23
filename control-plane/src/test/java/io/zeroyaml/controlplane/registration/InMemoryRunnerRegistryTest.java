@@ -3,6 +3,7 @@ package io.zeroyaml.controlplane.registration;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Clock;
@@ -26,7 +27,6 @@ import io.zeroyaml.controlplane.runner.RunnerState;
 class InMemoryRunnerRegistryTest {
 
 	private static final Duration HEARTBEAT_TIMEOUT = Duration.ofSeconds(15);
-	private static final Duration UNAVAILABLE_RETENTION = Duration.ofMinutes(10);
 
 	@Test
 	void acceptsTheFirstRegistrationForARunnerId() {
@@ -201,109 +201,32 @@ class InMemoryRunnerRegistryTest {
 
 	@Test
 	void listsNoAvailableRunnersWhenNothingIsRegistered() {
-		var registry = newRegistry(Instant.EPOCH);
-
-		assertTrue(registry.availableRunners().isEmpty());
+		assertTrue(newRegistry(Instant.EPOCH).availableRunners().isEmpty());
 	}
 
 	@Test
-	void doesNotListARunnerAsAvailableBeforeItReportsThatItAcceptsWork() {
-		var registry = newRegistry(Instant.EPOCH);
-		registry.register(runner("runner-1", "instance-1"));
-
-		// The registration snapshot predates the Runner's startup checks.
-		assertEquals(RunnerLiveness.HEALTHY, registry.livenessOf("runner-1"));
-		assertTrue(registry.availableRunners().isEmpty());
-	}
-
-	@Test
-	void listsARunnerAsAvailableOnceAHeartbeatReportsItReadyAndAcceptingWork() {
-		var registry = newRegistry(Instant.EPOCH);
-		registry.register(runner("runner-1", "instance-1"));
-
-		var outcome = registry.heartbeat("runner-1", "instance-1", RunnerState.READY, true);
-
-		assertEquals(HeartbeatDecision.ACKNOWLEDGED, outcome.decision());
-		var available = registry.availableRunners();
-		assertEquals(1, available.size());
-		assertEquals(RunnerState.READY, available.get(0).runner().state());
-		assertTrue(available.get(0).runner().acceptingWork());
-	}
-
-	@Test
-	void doesNotListAReadyRunnerThatDoesNotAcceptWork() {
-		var registry = newRegistry(Instant.EPOCH);
-		registry.register(runner("runner-1", "instance-1"));
-
-		registry.heartbeat("runner-1", "instance-1", RunnerState.READY, false);
-
-		assertTrue(registry.availableRunners().isEmpty());
-	}
-
-	@Test
-	void doesNotListARunnerThatIsNotReadyEvenIfItClaimsToAcceptWork() {
-		var registry = newRegistry(Instant.EPOCH);
-		registry.register(runner("runner-1", "instance-1"));
-
-		registry.heartbeat("runner-1", "instance-1", RunnerState.DRAINING, true);
-
-		assertTrue(registry.availableRunners().isEmpty());
-	}
-
-	@Test
-	void stopsListingARunnerWhoseLaterHeartbeatReportsItStoppedAcceptingWork() {
-		var registry = newRegistry(Instant.EPOCH);
-		registerAvailable(registry, "runner-1", "instance-1");
-
-		registry.heartbeat("runner-1", "instance-1", RunnerState.READY, false);
-
-		assertTrue(registry.availableRunners().isEmpty());
-	}
-
-	@Test
-	void keepsTheReportedAvailabilityForAHeartbeatThatCarriesLivenessOnly() {
-		var registry = newRegistry(Instant.EPOCH);
-		registerAvailable(registry, "runner-1", "instance-1");
-
-		registry.heartbeat("runner-1", "instance-1");
-
-		assertEquals(1, registry.availableRunners().size());
-	}
-
-	@Test
-	void ignoresTheAvailabilityReportedByADifferentInstance() {
-		var registry = newRegistry(Instant.EPOCH);
-		registry.register(runner("runner-1", "instance-1"));
-
-		var outcome = registry.heartbeat("runner-1", "instance-2", RunnerState.READY, true);
-
-		assertEquals(HeartbeatDecision.UNKNOWN_RUNNER, outcome.decision());
-		assertTrue(registry.availableRunners().isEmpty());
-	}
-
-	@Test
-	void listsOnlyRunnersWhoseHeartbeatIsWithinTheTimeout() {
+	void listsOnlyHealthyDockerCapableRunnersDespitePreRegistrationReadinessFlags() {
 		var clock = new MutableClock(Instant.EPOCH);
 		var registry = newRegistry(clock);
-		registerAvailable(registry, "runner-stale", "instance-1");
-		registerAvailable(registry, "runner-fresh", "instance-1");
-
-		clock.advance(HEARTBEAT_TIMEOUT.minusSeconds(1));
-		registry.heartbeat("runner-fresh", "instance-1", RunnerState.READY, true);
-		clock.advance(Duration.ofSeconds(2));
+		registry.register(dockerRunner("stale"));
+		clock.advance(HEARTBEAT_TIMEOUT.plusNanos(1));
+		registry.register(runner("docker-less", "instance-1"));
+		registry.register(dockerRunner("available"));
 
 		var available = registry.availableRunners();
 
-		assertEquals(List.of("runner-fresh"), available.stream().map(entry -> entry.runner().runnerId()).toList());
+		assertEquals(List.of("available"), available.stream().map(entry -> entry.runner().runnerId()).toList());
+		assertEquals(RunnerState.UNAVAILABLE, available.getFirst().runner().state());
+		assertFalse(available.getFirst().runner().acceptingWork());
 	}
 
 	@Test
-	void listsARunnerLastSeenExactlyTheHeartbeatTimeoutAgo() {
+	void includesTheTimeoutBoundaryAndExcludesTheNextInstant() {
 		var clock = new MutableClock(Instant.EPOCH);
 		var registry = newRegistry(clock);
-		registerAvailable(registry, "runner-1", "instance-1");
-
+		registry.register(dockerRunner("runner-1"));
 		clock.advance(HEARTBEAT_TIMEOUT);
+
 		assertEquals(1, registry.availableRunners().size());
 
 		clock.advance(Duration.ofNanos(1));
@@ -311,88 +234,22 @@ class InMemoryRunnerRegistryTest {
 	}
 
 	@Test
-	void listsARunnerAgainOnceItsHeartbeatResumes() {
+	void returnsAnImmutablePointInTimeSnapshot() {
 		var clock = new MutableClock(Instant.EPOCH);
 		var registry = newRegistry(clock);
-		registerAvailable(registry, "runner-1", "instance-1");
+		registry.register(dockerRunner("runner-1"));
+		var snapshot = registry.availableRunners();
 
-		clock.advance(HEARTBEAT_TIMEOUT.plusSeconds(1));
+		assertThrows(UnsupportedOperationException.class, snapshot::clear);
+		clock.advance(HEARTBEAT_TIMEOUT.plusNanos(1));
+
+		assertEquals(1, snapshot.size());
 		assertTrue(registry.availableRunners().isEmpty());
-
-		registry.heartbeat("runner-1", "instance-1");
-		assertEquals(1, registry.availableRunners().size());
 	}
 
-	@Test
-	void doesNotListARunnerRejectedAsAnIdentityConflict() {
-		var registry = newRegistry(Instant.EPOCH);
-		registerAvailable(registry, "runner-1", "instance-1");
-		registry.register(runner("runner-1", "instance-2"));
-
-		var available = registry.availableRunners();
-
-		assertEquals(1, available.size());
-		assertEquals("instance-1", available.get(0).runner().instanceId());
-	}
-
-	@Test
-	void keepsAnUnavailableEntryUntilTheRetentionElapses() {
-		var clock = new MutableClock(Instant.EPOCH);
-		var registry = newRegistry(clock);
-		registry.register(runner("runner-1", "instance-1"));
-
-		clock.advance(HEARTBEAT_TIMEOUT.plus(UNAVAILABLE_RETENTION));
-		registry.register(runner("runner-2", "instance-1"));
-
-		assertEquals(RunnerLiveness.UNAVAILABLE, registry.livenessOf("runner-1"));
-		assertEquals(
-				RegistrationDecision.IDENTITY_CONFLICT,
-				registry.register(runner("runner-1", "instance-2")).decision());
-	}
-
-	@Test
-	void evictsAnEntryThatStayedUnavailableLongerThanTheRetention() {
-		var clock = new MutableClock(Instant.EPOCH);
-		var registry = newRegistry(clock);
-		registry.register(runner("runner-1", "instance-1"));
-
-		clock.advance(HEARTBEAT_TIMEOUT.plus(UNAVAILABLE_RETENTION).plusNanos(1));
-		registry.register(runner("runner-2", "instance-1"));
-
-		assertEquals(RunnerLiveness.UNKNOWN, registry.livenessOf("runner-1"));
-		assertEquals(HeartbeatDecision.UNKNOWN_RUNNER, registry.heartbeat("runner-1", "instance-1").decision());
-	}
-
-	@Test
-	void letsANewInstanceRegisterUnderAnEvictedRunnerId() {
-		var clock = new MutableClock(Instant.EPOCH);
-		var registry = newRegistry(clock);
-		var first = registry.register(runner("runner-1", "instance-1"));
-
-		clock.advance(HEARTBEAT_TIMEOUT.plus(UNAVAILABLE_RETENTION).plusNanos(1));
-		var restarted = registry.register(runner("runner-1", "instance-2"));
-
-		assertEquals(RegistrationDecision.ACCEPTED, restarted.decision());
-		assertNotEquals(first.registrationId(), restarted.registrationId());
-	}
-
-	@Test
-	void neverEvictsARunnerThatKeepsSendingHeartbeats() {
-		var clock = new MutableClock(Instant.EPOCH);
-		var registry = newRegistry(clock);
-		var registered = registry.register(runner("runner-1", "instance-1"));
-
-		for (var elapsed = Duration.ZERO;
-				elapsed.compareTo(UNAVAILABLE_RETENTION.multipliedBy(2)) < 0;
-				elapsed = elapsed.plus(HEARTBEAT_TIMEOUT)) {
-			clock.advance(HEARTBEAT_TIMEOUT);
-			registry.heartbeat("runner-1", "instance-1");
-		}
-		registry.register(runner("runner-2", "instance-1"));
-
-		var again = registry.register(runner("runner-1", "instance-1"));
-		assertEquals(RegistrationDecision.ALREADY_REGISTERED, again.decision());
-		assertEquals(registered.registrationId(), again.registrationId());
+	private static RunnerInfo dockerRunner(String runnerId) {
+		return new RunnerInfo(runnerId, "instance-1", "0.1.0", "runner.v1", RunnerState.UNAVAILABLE,
+				false, new RunnerCapabilities("linux", "amd64", true, List.of(), Map.of()));
 	}
 
 	private static InMemoryRunnerRegistry newRegistry(Instant instant) {
@@ -402,13 +259,7 @@ class InMemoryRunnerRegistryTest {
 	private static InMemoryRunnerRegistry newRegistry(Clock clock) {
 		var properties = new RunnerRegistrationServerProperties();
 		properties.setHeartbeatTimeout(HEARTBEAT_TIMEOUT);
-		properties.setUnavailableRetention(UNAVAILABLE_RETENTION);
 		return new InMemoryRunnerRegistry(clock, properties);
-	}
-
-	private static void registerAvailable(InMemoryRunnerRegistry registry, String runnerId, String instanceId) {
-		registry.register(runner(runnerId, instanceId));
-		registry.heartbeat(runnerId, instanceId, RunnerState.READY, true);
 	}
 
 	private static RunnerInfo runner(String runnerId, String instanceId) {

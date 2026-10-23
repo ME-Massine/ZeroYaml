@@ -65,26 +65,12 @@ identity pair rather than a new identity shape, so the Control Plane
 reconciles a heartbeat against the same registry entry that `Register`
 created.
 
-A registered Runner sends a heartbeat once right after registration and then
-at a fixed interval (`ZEROYAML_RUNNER_HEARTBEAT_INTERVAL`, default `5s`), each
-attempt bounded by its own timeout (`ZEROYAML_RUNNER_HEARTBEAT_TIMEOUT`,
-default `5s`). The loop only starts once registration accepted the Runner, and
-it stops when the Runner shuts down; a failed or declined heartbeat is logged
-and never stops the loop or the process.
-
-Every heartbeat also carries the Runner's current `status` and
-`accepting_work`. The registration request cannot: it is sent before the Runner
-becomes `READY`. The Control Plane replaces the registration snapshot with the
-values of each acknowledged heartbeat and offers work only to a Runner that is
-`HEALTHY`, last reported `READY`, and last reported `accepting_work = true`;
-see [Runner selection](./runner-selection.md). The immediate first heartbeat is
-what makes a freshly registered Runner selectable without waiting an interval.
-
-A heartbeat with `RUNNER_STATUS_UNSPECIFIED` comes from a Runner that predates
-these fields. It advances liveness only and leaves the recorded availability
-unchanged; `accepting_work` is not read, because an absent value is
-indistinguishable from `false`. A status value this Control Plane version does
-not know is recorded as `UNAVAILABLE` and not accepting work.
+A registered Runner sends a heartbeat at a fixed interval
+(`ZEROYAML_RUNNER_HEARTBEAT_INTERVAL`, default `5s`), each attempt bounded by
+its own timeout (`ZEROYAML_RUNNER_HEARTBEAT_TIMEOUT`, default `5s`). The loop
+only starts once registration accepted the Runner, and it stops when the
+Runner shuts down; a failed or declined heartbeat is logged and never stops
+the loop or the process.
 
 The Control Plane tracks `lastSeenAt` per registered Runner, advanced by both
 registration and every acknowledged heartbeat, and derives liveness from it on
@@ -94,23 +80,8 @@ demand rather than through a background sweep:
   `zeroyaml.registration.heartbeat-timeout` (default `15s`).
 - `UNAVAILABLE`: no registration or heartbeat was recorded within the timeout.
   The next acknowledged heartbeat makes the same registry entry `HEALTHY`
-  again, unless the entry was evicted first (see below); recovery never
-  creates a duplicate entry.
-- `UNKNOWN`: no Runner is registered under that `runner_id`, either because
-  none ever registered or because its entry was evicted.
-
-An entry that stays `UNAVAILABLE` for longer than
-`zeroyaml.registration.unavailable-retention` (default `10m`) is evicted the
-next time any Runner registers. Eviction keeps the in-memory registry
-proportional to the Runners seen recently, and it is the point at which a new
-process may register its `instance_id` under the same `runner_id`; before it,
-that registration is `REGISTRATION_IDENTITY_CONFLICT`. A Runner that keeps
-sending heartbeats is never evicted.
-
-`Register` rejects a blank `runner_id` or `instance_id` with `INVALID_ARGUMENT`.
-The pair keys the registry and names the Runner a Job is dispatched to, so an
-empty identity, which is also the protobuf default for an omitted field, is
-never stored.
+  again; recovery never creates a duplicate entry.
+- `UNKNOWN`: no Runner has ever registered under that `runner_id`.
 
 A heartbeat for a `runner_id` that never registered, or that is registered
 under a different `instance_id`, is answered with

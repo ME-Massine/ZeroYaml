@@ -246,10 +246,6 @@ const (
 	// The Runner is not accepting work, for example while starting or draining.
 	// The Control Plane may dispatch the Job to another Runner.
 	JobRejectionReason_JOB_REJECTION_RUNNER_UNAVAILABLE JobRejectionReason = 2
-	// The dispatch names a different Runner process as its target. This process
-	// was not selected for the Job, so the Control Plane must not record it as
-	// the executing Runner.
-	JobRejectionReason_JOB_REJECTION_NOT_TARGET_RUNNER JobRejectionReason = 3
 )
 
 // Enum value maps for JobRejectionReason.
@@ -258,13 +254,11 @@ var (
 		0: "JOB_REJECTION_REASON_UNSPECIFIED",
 		1: "JOB_REJECTION_UNSUPPORTED_PROTOCOL_VERSION",
 		2: "JOB_REJECTION_RUNNER_UNAVAILABLE",
-		3: "JOB_REJECTION_NOT_TARGET_RUNNER",
 	}
 	JobRejectionReason_value = map[string]int32{
 		"JOB_REJECTION_REASON_UNSPECIFIED":           0,
 		"JOB_REJECTION_UNSUPPORTED_PROTOCOL_VERSION": 1,
 		"JOB_REJECTION_RUNNER_UNAVAILABLE":           2,
-		"JOB_REJECTION_NOT_TARGET_RUNNER":            3,
 	}
 )
 
@@ -856,20 +850,9 @@ func (x *RegisterRunnerResponse) GetMessage() string {
 // reuses the registration identity pair instead of a new identity shape so
 // the Control Plane reconciles it against the same registry entry.
 type HeartbeatRequest struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	RunnerId   string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
-	InstanceId string                 `protobuf:"bytes,2,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
-	// Lifecycle state of the Runner at the time of the heartbeat. Registration
-	// happens before a Runner finishes its startup checks, so the heartbeat is
-	// what keeps the Control Plane's view of availability current.
-	//
-	// RUNNER_STATUS_UNSPECIFIED means the sender predates this field. The
-	// Control Plane then records liveness only and keeps the availability it
-	// already holds, ignoring accepting_work.
-	Status RunnerStatus `protobuf:"varint,3,opt,name=status,proto3,enum=zeroyaml.runner.v1.RunnerStatus" json:"status,omitempty"`
-	// Whether the Runner takes a dispatch right now. Read only together with a
-	// specified status, because an absent value is indistinguishable from false.
-	AcceptingWork bool `protobuf:"varint,4,opt,name=accepting_work,json=acceptingWork,proto3" json:"accepting_work,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RunnerId      string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
+	InstanceId    string                 `protobuf:"bytes,2,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -916,20 +899,6 @@ func (x *HeartbeatRequest) GetInstanceId() string {
 		return x.InstanceId
 	}
 	return ""
-}
-
-func (x *HeartbeatRequest) GetStatus() RunnerStatus {
-	if x != nil {
-		return x.Status
-	}
-	return RunnerStatus_RUNNER_STATUS_UNSPECIFIED
-}
-
-func (x *HeartbeatRequest) GetAcceptingWork() bool {
-	if x != nil {
-		return x.AcceptingWork
-	}
-	return false
 }
 
 type HeartbeatResponse struct {
@@ -994,16 +963,8 @@ type RunJobRequest struct {
 	// guessing the meaning of the remaining fields.
 	ProtocolVersion string            `protobuf:"bytes,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	Job             *JobSpecification `protobuf:"bytes,2,opt,name=job,proto3" json:"job,omitempty"`
-	// Runner process the Control Plane selected for this Job. A Runner whose own
-	// identity differs declines with JOB_REJECTION_NOT_TARGET_RUNNER, so a
-	// dispatch that reaches another process is never executed there.
-	//
-	// Both fields are set together. Both empty means the caller predates these
-	// fields and names no target; the Runner then applies no target check.
-	TargetRunnerId   string `protobuf:"bytes,3,opt,name=target_runner_id,json=targetRunnerId,proto3" json:"target_runner_id,omitempty"`
-	TargetInstanceId string `protobuf:"bytes,4,opt,name=target_instance_id,json=targetInstanceId,proto3" json:"target_instance_id,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *RunJobRequest) Reset() {
@@ -1048,20 +1009,6 @@ func (x *RunJobRequest) GetJob() *JobSpecification {
 		return x.Job
 	}
 	return nil
-}
-
-func (x *RunJobRequest) GetTargetRunnerId() string {
-	if x != nil {
-		return x.TargetRunnerId
-	}
-	return ""
-}
-
-func (x *RunJobRequest) GetTargetInstanceId() string {
-	if x != nil {
-		return x.TargetInstanceId
-	}
-	return ""
 }
 
 // JobSpecification is the minimum executable description of one Job. Additional
@@ -1719,21 +1666,17 @@ const file_runner_v1_runner_proto_rawDesc = "" +
 	"\x16RegisterRunnerResponse\x12>\n" +
 	"\x06result\x18\x01 \x01(\x0e2&.zeroyaml.runner.v1.RegistrationResultR\x06result\x12'\n" +
 	"\x0fregistration_id\x18\x02 \x01(\tR\x0eregistrationId\x12\x18\n" +
-	"\amessage\x18\x03 \x01(\tR\amessage\"\xb1\x01\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"P\n" +
 	"\x10HeartbeatRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1f\n" +
 	"\vinstance_id\x18\x02 \x01(\tR\n" +
-	"instanceId\x128\n" +
-	"\x06status\x18\x03 \x01(\x0e2 .zeroyaml.runner.v1.RunnerStatusR\x06status\x12%\n" +
-	"\x0eaccepting_work\x18\x04 \x01(\bR\racceptingWork\"j\n" +
+	"instanceId\"j\n" +
 	"\x11HeartbeatResponse\x12;\n" +
 	"\x06result\x18\x01 \x01(\x0e2#.zeroyaml.runner.v1.HeartbeatResultR\x06result\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\xca\x01\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"r\n" +
 	"\rRunJobRequest\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\tR\x0fprotocolVersion\x126\n" +
-	"\x03job\x18\x02 \x01(\v2$.zeroyaml.runner.v1.JobSpecificationR\x03job\x12(\n" +
-	"\x10target_runner_id\x18\x03 \x01(\tR\x0etargetRunnerId\x12,\n" +
-	"\x12target_instance_id\x18\x04 \x01(\tR\x10targetInstanceId\"\xac\x01\n" +
+	"\x03job\x18\x02 \x01(\v2$.zeroyaml.runner.v1.JobSpecificationR\x03job\"\xac\x01\n" +
 	"\x10JobSpecification\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12A\n" +
 	"\n" +
@@ -1801,12 +1744,11 @@ const file_runner_v1_runner_proto_rawDesc = "" +
 	"\rJobAcceptance\x12\x1e\n" +
 	"\x1aJOB_ACCEPTANCE_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fJOB_ACCEPTED\x10\x01\x12\x10\n" +
-	"\fJOB_REJECTED\x10\x02*\xb5\x01\n" +
+	"\fJOB_REJECTED\x10\x02*\x90\x01\n" +
 	"\x12JobRejectionReason\x12$\n" +
 	" JOB_REJECTION_REASON_UNSPECIFIED\x10\x00\x12.\n" +
 	"*JOB_REJECTION_UNSUPPORTED_PROTOCOL_VERSION\x10\x01\x12$\n" +
-	" JOB_REJECTION_RUNNER_UNAVAILABLE\x10\x02\x12#\n" +
-	"\x1fJOB_REJECTION_NOT_TARGET_RUNNER\x10\x03*\x8a\x01\n" +
+	" JOB_REJECTION_RUNNER_UNAVAILABLE\x10\x02*\x8a\x01\n" +
 	"\x11JobExecutionState\x12#\n" +
 	"\x1fJOB_EXECUTION_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15JOB_EXECUTION_RUNNING\x10\x01\x12\x1b\n" +
@@ -1893,37 +1835,36 @@ var file_runner_v1_runner_proto_depIdxs = []int32{
 	26, // 2: zeroyaml.runner.v1.RunnerCapabilities.labels:type_name -> zeroyaml.runner.v1.RunnerCapabilities.LabelsEntry
 	10, // 3: zeroyaml.runner.v1.RegisterRunnerRequest.runner:type_name -> zeroyaml.runner.v1.RunnerInfo
 	2,  // 4: zeroyaml.runner.v1.RegisterRunnerResponse.result:type_name -> zeroyaml.runner.v1.RegistrationResult
-	1,  // 5: zeroyaml.runner.v1.HeartbeatRequest.status:type_name -> zeroyaml.runner.v1.RunnerStatus
-	0,  // 6: zeroyaml.runner.v1.HeartbeatResponse.result:type_name -> zeroyaml.runner.v1.HeartbeatResult
-	17, // 7: zeroyaml.runner.v1.RunJobRequest.job:type_name -> zeroyaml.runner.v1.JobSpecification
-	18, // 8: zeroyaml.runner.v1.JobSpecification.repository:type_name -> zeroyaml.runner.v1.JobRepository
-	19, // 9: zeroyaml.runner.v1.JobSpecification.execution:type_name -> zeroyaml.runner.v1.JobExecution
-	3,  // 10: zeroyaml.runner.v1.RunJobResponse.acceptance:type_name -> zeroyaml.runner.v1.JobAcceptance
-	4,  // 11: zeroyaml.runner.v1.RunJobResponse.rejection_reason:type_name -> zeroyaml.runner.v1.JobRejectionReason
-	5,  // 12: zeroyaml.runner.v1.ReportJobStatusRequest.state:type_name -> zeroyaml.runner.v1.JobExecutionState
-	27, // 13: zeroyaml.runner.v1.ReportJobStatusRequest.started_at:type_name -> google.protobuf.Timestamp
-	27, // 14: zeroyaml.runner.v1.ReportJobStatusRequest.completed_at:type_name -> google.protobuf.Timestamp
-	22, // 15: zeroyaml.runner.v1.ReportJobStatusRequest.result:type_name -> zeroyaml.runner.v1.JobExecutionResult
-	6,  // 16: zeroyaml.runner.v1.JobExecutionResult.failure_reason:type_name -> zeroyaml.runner.v1.JobExecutionFailureReason
-	7,  // 17: zeroyaml.runner.v1.ReportJobStatusResponse.result:type_name -> zeroyaml.runner.v1.JobStatusReportResult
-	8,  // 18: zeroyaml.runner.v1.ReportJobStatusResponse.job_state:type_name -> zeroyaml.runner.v1.JobLifecycleState
-	24, // 19: zeroyaml.runner.v1.RunnerService.Ping:input_type -> zeroyaml.runner.v1.PingRequest
-	9,  // 20: zeroyaml.runner.v1.RunnerService.GetInfo:input_type -> zeroyaml.runner.v1.GetInfoRequest
-	16, // 21: zeroyaml.runner.v1.RunnerService.RunJob:input_type -> zeroyaml.runner.v1.RunJobRequest
-	12, // 22: zeroyaml.runner.v1.RunnerRegistrationService.Register:input_type -> zeroyaml.runner.v1.RegisterRunnerRequest
-	14, // 23: zeroyaml.runner.v1.RunnerRegistrationService.Heartbeat:input_type -> zeroyaml.runner.v1.HeartbeatRequest
-	21, // 24: zeroyaml.runner.v1.JobExecutionStatusService.ReportJobStatus:input_type -> zeroyaml.runner.v1.ReportJobStatusRequest
-	25, // 25: zeroyaml.runner.v1.RunnerService.Ping:output_type -> zeroyaml.runner.v1.PingResponse
-	10, // 26: zeroyaml.runner.v1.RunnerService.GetInfo:output_type -> zeroyaml.runner.v1.RunnerInfo
-	20, // 27: zeroyaml.runner.v1.RunnerService.RunJob:output_type -> zeroyaml.runner.v1.RunJobResponse
-	13, // 28: zeroyaml.runner.v1.RunnerRegistrationService.Register:output_type -> zeroyaml.runner.v1.RegisterRunnerResponse
-	15, // 29: zeroyaml.runner.v1.RunnerRegistrationService.Heartbeat:output_type -> zeroyaml.runner.v1.HeartbeatResponse
-	23, // 30: zeroyaml.runner.v1.JobExecutionStatusService.ReportJobStatus:output_type -> zeroyaml.runner.v1.ReportJobStatusResponse
-	25, // [25:31] is the sub-list for method output_type
-	19, // [19:25] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	0,  // 5: zeroyaml.runner.v1.HeartbeatResponse.result:type_name -> zeroyaml.runner.v1.HeartbeatResult
+	17, // 6: zeroyaml.runner.v1.RunJobRequest.job:type_name -> zeroyaml.runner.v1.JobSpecification
+	18, // 7: zeroyaml.runner.v1.JobSpecification.repository:type_name -> zeroyaml.runner.v1.JobRepository
+	19, // 8: zeroyaml.runner.v1.JobSpecification.execution:type_name -> zeroyaml.runner.v1.JobExecution
+	3,  // 9: zeroyaml.runner.v1.RunJobResponse.acceptance:type_name -> zeroyaml.runner.v1.JobAcceptance
+	4,  // 10: zeroyaml.runner.v1.RunJobResponse.rejection_reason:type_name -> zeroyaml.runner.v1.JobRejectionReason
+	5,  // 11: zeroyaml.runner.v1.ReportJobStatusRequest.state:type_name -> zeroyaml.runner.v1.JobExecutionState
+	27, // 12: zeroyaml.runner.v1.ReportJobStatusRequest.started_at:type_name -> google.protobuf.Timestamp
+	27, // 13: zeroyaml.runner.v1.ReportJobStatusRequest.completed_at:type_name -> google.protobuf.Timestamp
+	22, // 14: zeroyaml.runner.v1.ReportJobStatusRequest.result:type_name -> zeroyaml.runner.v1.JobExecutionResult
+	6,  // 15: zeroyaml.runner.v1.JobExecutionResult.failure_reason:type_name -> zeroyaml.runner.v1.JobExecutionFailureReason
+	7,  // 16: zeroyaml.runner.v1.ReportJobStatusResponse.result:type_name -> zeroyaml.runner.v1.JobStatusReportResult
+	8,  // 17: zeroyaml.runner.v1.ReportJobStatusResponse.job_state:type_name -> zeroyaml.runner.v1.JobLifecycleState
+	24, // 18: zeroyaml.runner.v1.RunnerService.Ping:input_type -> zeroyaml.runner.v1.PingRequest
+	9,  // 19: zeroyaml.runner.v1.RunnerService.GetInfo:input_type -> zeroyaml.runner.v1.GetInfoRequest
+	16, // 20: zeroyaml.runner.v1.RunnerService.RunJob:input_type -> zeroyaml.runner.v1.RunJobRequest
+	12, // 21: zeroyaml.runner.v1.RunnerRegistrationService.Register:input_type -> zeroyaml.runner.v1.RegisterRunnerRequest
+	14, // 22: zeroyaml.runner.v1.RunnerRegistrationService.Heartbeat:input_type -> zeroyaml.runner.v1.HeartbeatRequest
+	21, // 23: zeroyaml.runner.v1.JobExecutionStatusService.ReportJobStatus:input_type -> zeroyaml.runner.v1.ReportJobStatusRequest
+	25, // 24: zeroyaml.runner.v1.RunnerService.Ping:output_type -> zeroyaml.runner.v1.PingResponse
+	10, // 25: zeroyaml.runner.v1.RunnerService.GetInfo:output_type -> zeroyaml.runner.v1.RunnerInfo
+	20, // 26: zeroyaml.runner.v1.RunnerService.RunJob:output_type -> zeroyaml.runner.v1.RunJobResponse
+	13, // 27: zeroyaml.runner.v1.RunnerRegistrationService.Register:output_type -> zeroyaml.runner.v1.RegisterRunnerResponse
+	15, // 28: zeroyaml.runner.v1.RunnerRegistrationService.Heartbeat:output_type -> zeroyaml.runner.v1.HeartbeatResponse
+	23, // 29: zeroyaml.runner.v1.JobExecutionStatusService.ReportJobStatus:output_type -> zeroyaml.runner.v1.ReportJobStatusResponse
+	24, // [24:30] is the sub-list for method output_type
+	18, // [18:24] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_runner_v1_runner_proto_init() }

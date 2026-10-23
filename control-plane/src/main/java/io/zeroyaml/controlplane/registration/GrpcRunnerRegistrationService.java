@@ -14,7 +14,6 @@ import io.zeroyaml.contracts.runner.v1.RegisterRunnerResponse;
 import io.zeroyaml.contracts.runner.v1.RegistrationResult;
 import io.zeroyaml.contracts.runner.v1.RunnerRegistrationServiceGrpc;
 import io.zeroyaml.controlplane.runner.RunnerInfoMapper;
-import io.zeroyaml.controlplane.runner.RunnerState;
 
 /**
  * gRPC endpoint the Runner calls to register with the Control Plane and to
@@ -39,8 +38,8 @@ class GrpcRunnerRegistrationService extends RunnerRegistrationServiceGrpc.Runner
 			responseObserver.onNext(toResponse(outcome));
 			responseObserver.onCompleted();
 		} catch (IllegalArgumentException exception) {
-			// A malformed identity, such as a blank runner_id or an unspecified status, is a
-			// client error; surface it explicitly instead of registering a Runner with unusable state.
+			// A malformed identity, such as an unspecified status, is a client error;
+			// surface it explicitly instead of registering a Runner with unusable state.
 			responseObserver.onError(Status.INVALID_ARGUMENT
 					.withDescription(exception.getMessage())
 					.withCause(exception)
@@ -50,25 +49,9 @@ class GrpcRunnerRegistrationService extends RunnerRegistrationServiceGrpc.Runner
 
 	@Override
 	public void heartbeat(HeartbeatRequest request, StreamObserver<HeartbeatResponse> responseObserver) {
-		responseObserver.onNext(toResponse(recordHeartbeat(request)));
+		var outcome = registry.heartbeat(request.getRunnerId(), request.getInstanceId());
+		responseObserver.onNext(toResponse(outcome));
 		responseObserver.onCompleted();
-	}
-
-	private HeartbeatOutcome recordHeartbeat(HeartbeatRequest request) {
-		return switch (request.getStatus()) {
-			// A Runner that predates the status field reports liveness only; an
-			// absent accepting_work is indistinguishable from false, so it is not read.
-			case RUNNER_STATUS_UNSPECIFIED -> registry.heartbeat(request.getRunnerId(), request.getInstanceId());
-			// A status this Control Plane version does not know says nothing about
-			// whether the Runner can take work, so the Runner is offered none.
-			case UNRECOGNIZED -> registry.heartbeat(
-					request.getRunnerId(), request.getInstanceId(), RunnerState.UNAVAILABLE, false);
-			default -> registry.heartbeat(
-					request.getRunnerId(),
-					request.getInstanceId(),
-					RunnerInfoMapper.toRunnerState(request.getStatus()),
-					request.getAcceptingWork());
-		};
 	}
 
 	private static RegisterRunnerResponse toResponse(RegistrationOutcome outcome) {

@@ -36,16 +36,6 @@ public class RunnerRegistrationServerProperties {
 	 */
 	private Duration heartbeatTimeout = Duration.ofSeconds(15);
 
-	/**
-	 * How long an entry stays in the registry after it became
-	 * {@link RunnerLiveness#UNAVAILABLE} before it is removed. It bounds the
-	 * registry by the Runners seen recently, and it is also how long a
-	 * {@code runnerId} stays reserved for the instance that stopped reporting,
-	 * so a restarted Runner with a new {@code instanceId} is an identity
-	 * conflict until it elapses.
-	 */
-	private Duration unavailableRetention = Duration.ofMinutes(10);
-
 	public int getPort() {
 		return port;
 	}
@@ -62,25 +52,11 @@ public class RunnerRegistrationServerProperties {
 		this.heartbeatTimeout = heartbeatTimeout;
 	}
 
-	public Duration getUnavailableRetention() {
-		return unavailableRetention;
-	}
-
-	public void setUnavailableRetention(Duration unavailableRetention) {
-		this.unavailableRetention = unavailableRetention;
-	}
-
 	@PostConstruct
 	void validate() {
 		if (heartbeatTimeout == null || heartbeatTimeout.isZero() || heartbeatTimeout.isNegative()) {
 			throw new IllegalStateException(
 					"zeroyaml.registration.heartbeat-timeout must be greater than zero, got " + heartbeatTimeout
-			);
-		}
-		if (unavailableRetention == null || unavailableRetention.isZero() || unavailableRetention.isNegative()) {
-			throw new IllegalStateException(
-					"zeroyaml.registration.unavailable-retention must be greater than zero, got "
-							+ unavailableRetention
 			);
 		}
 	}

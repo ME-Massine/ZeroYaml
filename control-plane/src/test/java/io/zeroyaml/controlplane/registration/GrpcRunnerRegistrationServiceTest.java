@@ -12,7 +12,6 @@ import java.time.ZoneOffset;
 
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
-import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
@@ -24,7 +23,6 @@ import io.zeroyaml.contracts.runner.v1.RunnerCapabilities;
 import io.zeroyaml.contracts.runner.v1.RunnerInfo;
 import io.zeroyaml.contracts.runner.v1.RunnerRegistrationServiceGrpc;
 import io.zeroyaml.contracts.runner.v1.RunnerStatus;
-import io.zeroyaml.controlplane.runner.RunnerState;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -96,76 +94,6 @@ class GrpcRunnerRegistrationServiceTest {
 				.build();
 
 		assertThrows(StatusRuntimeException.class, () -> client.register(request));
-	}
-
-	@Test
-	void rejectsABlankRunnerIdentityAsAnInvalidArgument() throws IOException {
-		var registry = newRegistry();
-		var client = startService(registry);
-
-		// An empty runner_id is the protocol default, so this is what a Runner that omits it sends.
-		var blankRunnerId = assertThrows(
-				StatusRuntimeException.class, () -> client.register(registerRequest("", "instance-1")));
-		var blankInstanceId = assertThrows(
-				StatusRuntimeException.class, () -> client.register(registerRequest("runner-1", " ")));
-
-		assertEquals(Status.Code.INVALID_ARGUMENT, blankRunnerId.getStatus().getCode());
-		assertEquals(Status.Code.INVALID_ARGUMENT, blankInstanceId.getStatus().getCode());
-		assertEquals(RunnerLiveness.UNKNOWN, registry.livenessOf(""));
-		assertEquals(RunnerLiveness.UNKNOWN, registry.livenessOf("runner-1"));
-	}
-
-	@Test
-	void recordsTheAvailabilityAHeartbeatReports() throws IOException {
-		var registry = newRegistry();
-		var client = startService(registry);
-		client.register(registerRequest("runner-1", "instance-1"));
-		assertTrue(registry.availableRunners().isEmpty());
-
-		var response = client.heartbeat(HeartbeatRequest.newBuilder()
-				.setRunnerId("runner-1")
-				.setInstanceId("instance-1")
-				.setStatus(RunnerStatus.RUNNER_STATUS_READY)
-				.setAcceptingWork(true)
-				.build());
-
-		assertEquals(HeartbeatResult.HEARTBEAT_ACKNOWLEDGED, response.getResult());
-		assertEquals(1, registry.availableRunners().size());
-	}
-
-	@Test
-	void keepsTheRecordedAvailabilityForAHeartbeatWithoutAStatus() throws IOException {
-		var registry = newRegistry();
-		var client = startService(registry);
-		client.register(registerRequest("runner-1", "instance-1"));
-		registry.heartbeat("runner-1", "instance-1", RunnerState.READY, true);
-
-		// A Runner that predates the status field sends only its identity.
-		var response = client.heartbeat(HeartbeatRequest.newBuilder()
-				.setRunnerId("runner-1")
-				.setInstanceId("instance-1")
-				.build());
-
-		assertEquals(HeartbeatResult.HEARTBEAT_ACKNOWLEDGED, response.getResult());
-		assertEquals(1, registry.availableRunners().size());
-	}
-
-	@Test
-	void treatsAStatusThisVersionDoesNotKnowAsNotAvailable() throws IOException {
-		var registry = newRegistry();
-		var client = startService(registry);
-		client.register(registerRequest("runner-1", "instance-1"));
-		registry.heartbeat("runner-1", "instance-1", RunnerState.READY, true);
-
-		var response = client.heartbeat(HeartbeatRequest.newBuilder()
-				.setRunnerId("runner-1")
-				.setInstanceId("instance-1")
-				.setStatusValue(99)
-				.setAcceptingWork(true)
-				.build());
-
-		assertEquals(HeartbeatResult.HEARTBEAT_ACKNOWLEDGED, response.getResult());
-		assertTrue(registry.availableRunners().isEmpty());
 	}
 
 	@Test

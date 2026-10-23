@@ -7,16 +7,16 @@ import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
 
 /**
  * The Control Plane's decision of where one Job runs: the Job paired with the
- * Runner process chosen to execute it. Dispatch code reads the target from here
- * instead of choosing a Runner itself, so the Runner never decides what it runs.
+ * Runner process selected by policy. Future dispatch coordination can read the
+ * decision from here instead of choosing a Runner itself.
  *
- * <p>The decision is enforced on the wire: {@code runner} is passed to
- * {@link io.zeroyaml.controlplane.runner.RunnerClient#dispatchJob}, which names
- * it in the dispatch, and any other Runner process that receives that dispatch
- * declines it.</p>
+ * <p>This value is not wired to {@code RunnerClient}: the existing client calls
+ * one configured endpoint and cannot route to a selected process. Routing and
+ * enforcing the assignment across dispatch and status reports require separate
+ * coordination work before this context can drive production dispatch.</p>
  *
  * <p>The context records a decision only. The Job stays queued until the
- * selected Runner reports that it started, which is when the Job aggregate
+ * executing Runner reports that it started, which is when the Job aggregate
  * records the assignment.</p>
  *
  * @param jobId Job the decision applies to

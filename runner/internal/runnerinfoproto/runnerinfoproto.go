@@ -25,14 +25,12 @@ func ToProto(identity runneridentity.Identity) *runnerv1.RunnerInfo {
 			SupportedExecutors: capabilities.SupportedExecutors,
 			Labels:             capabilities.Labels,
 		},
-		Status:        StatusToProto(identity.Status),
+		Status:        statusToProto(identity.Status),
 		AcceptingWork: identity.AcceptingWork,
 	}
 }
 
-// StatusToProto maps a Runner lifecycle status to its protocol value. An
-// unrecognized status maps to unspecified, which receivers treat as not reported.
-func StatusToProto(status runneridentity.Status) runnerv1.RunnerStatus {
+func statusToProto(status runneridentity.Status) runnerv1.RunnerStatus {
 	switch status {
 	case runneridentity.StatusStarting:
 		return runnerv1.RunnerStatus_RUNNER_STATUS_STARTING

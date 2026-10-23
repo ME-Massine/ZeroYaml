@@ -12,12 +12,6 @@ public enum JobRejectionReason {
 	RUNNER_UNAVAILABLE,
 
 	/**
-	 * The dispatch reached a Runner process other than the one the Control
-	 * Plane selected. The answering process did not start the Job.
-	 */
-	NOT_TARGET_RUNNER,
-
-	/**
 	 * The Runner reported a reason this Control Plane version does not know.
 	 * Rejection reasons evolve additively, so an unknown value must be treated
 	 * as a refusal rather than as an acceptance.

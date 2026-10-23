@@ -29,12 +29,7 @@ public final class RunnerInfoMapper {
 		);
 	}
 
-	/**
-	 * Maps a reported protocol status to the Runner lifecycle state.
-	 *
-	 * @throws IllegalArgumentException if the status is unspecified or not known to this version
-	 */
-	public static RunnerState toRunnerState(io.zeroyaml.contracts.runner.v1.RunnerStatus status) {
+	private static RunnerState toRunnerState(io.zeroyaml.contracts.runner.v1.RunnerStatus status) {
 		return switch (status) {
 			case RUNNER_STATUS_STARTING -> RunnerState.STARTING;
 			case RUNNER_STATUS_READY -> RunnerState.READY;

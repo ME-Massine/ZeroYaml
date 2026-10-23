@@ -22,8 +22,6 @@ import (
 // keeps repository details and command arguments out of Control Plane logs.
 const acceptedMessage = "job accepted by the runner"
 
-const notTargetMessage = "dispatch names a different runner process as its target"
-
 // maxLoggedValueLength bounds caller-supplied identifiers in log records. A
 // dispatch arrives from the network, so an oversized job_id or protocol_version
 // must not be able to inflate the Runner's logs.
@@ -67,10 +65,6 @@ func (s *Server) RunJob(
 // Field validation follows, and Runner state is examined last, so that a caller
 // defect is reported as such even while the Runner is unavailable.
 //
-// A dispatch addressed to another Runner process is declined with
-// JOB_REJECTION_NOT_TARGET_RUNNER before Runner state is examined, because that
-// answer holds whatever this process could otherwise do.
-//
 // A Runner without a verified Docker daemon reports accepting_work = false and
 // rejects every dispatch with JOB_REJECTION_RUNNER_UNAVAILABLE. So does a
 // Runner whose execution slots are all in use or that is shutting down, because
@@ -99,18 +93,6 @@ func (s *Server) acknowledgeJob(req *runnerv1.RunJobRequest) (*runnerv1.RunJobRe
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	targeted, err := s.isDispatchTarget(req)
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	if !targeted {
-		return s.rejectJob(
-			req.GetJob().GetJobId(),
-			runnerv1.JobRejectionReason_JOB_REJECTION_NOT_TARGET_RUNNER,
-			notTargetMessage,
-		), nil
-	}
-
 	if !s.identity.AcceptingWork || s.jobs == nil {
 		return s.rejectJob(
 			req.GetJob().GetJobId(),
@@ -130,28 +112,6 @@ func (s *Server) acknowledgeJob(req *runnerv1.RunJobRequest) (*runnerv1.RunJobRe
 		RunnerId:   s.identity.RunnerID,
 		InstanceId: s.identity.InstanceID,
 	}, nil
-}
-
-// isDispatchTarget reports whether req is addressed to this Runner process.
-//
-// The Control Plane selects the Runner; this check is what makes that
-// selection hold when a dispatch reaches a different process, for example
-// after a restart changed the instance behind an address. A request that names
-// no target comes from a caller that predates the target fields and is treated
-// as addressed to this process, and one that names only half of the identity
-// pair is a caller defect.
-func (s *Server) isDispatchTarget(req *runnerv1.RunJobRequest) (bool, error) {
-	targetRunnerID := req.GetTargetRunnerId()
-	targetInstanceID := req.GetTargetInstanceId()
-
-	if targetRunnerID == "" && targetInstanceID == "" {
-		return true, nil
-	}
-	if strings.TrimSpace(targetRunnerID) == "" || strings.TrimSpace(targetInstanceID) == "" {
-		return false, fmt.Errorf("target_runner_id and target_instance_id must be set together")
-	}
-
-	return targetRunnerID == s.identity.RunnerID && targetInstanceID == s.identity.InstanceID, nil
 }
 
 // answerSubmitFailure maps a Job the JobSubmitter did not start onto the

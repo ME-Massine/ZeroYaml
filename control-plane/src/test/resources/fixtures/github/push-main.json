@@ -1,0 +1,19 @@
+{
+  "ref": "refs/heads/main",
+  "before": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "after": "0123456789abcdef0123456789abcdef01234567",
+  "created": false,
+  "deleted": false,
+  "forced": false,
+  "repository": {
+    "name": "ZeroYaml",
+    "full_name": "MohamedMBG/ZeroYaml",
+    "owner": {
+      "login": "MohamedMBG"
+    }
+  },
+  "head_commit": {
+    "id": "0123456789abcdef0123456789abcdef01234567",
+    "timestamp": "2026-09-30T12:15:30Z"
+  }
+}

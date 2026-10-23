@@ -61,46 +61,42 @@ class RunnerSelectionIntegrationTest {
 	}
 
 	@Test
-	void doesNotSelectARunnerThatRegisteredButHasNotReportedAvailabilityYet() {
-		// Registration is sent before the Runner knows whether it can take work.
-		registry.register(runner("runner-1", "instance-1"));
-
-		assertBlocked(selector.select(queuedJob()));
-	}
-
-	@Test
-	void selectsARunnerOnceItsHeartbeatReportsItReadyAndAcceptingWork() {
-		registerAvailable("runner-1", "instance-1");
+	void selectsAHealthyDockerCapableRunnerUsingTheExistingRegistrationSnapshot() {
+		registry.register(runner("runner-1", "instance-1", true));
 
 		assertEquals(new RunnerAssignment("runner-1", "instance-1"), selectedRunner(selector.select(queuedJob())));
 	}
 
 	@Test
-	void skipsAHealthyRunnerThatDoesNotAcceptWorkEvenWhenItSortsFirst() {
+	void blocksWhenNoRunnerIsRegistered() {
+		assertBlocked(selector.select(queuedJob()));
+	}
+
+	@Test
+	void skipsAHealthyDockerLessRunnerEvenWhenItSortsFirst() {
 		// A Runner without a Docker daemon keeps sending heartbeats but rejects every dispatch.
-		registry.register(runner("runner-a", "instance-a"));
-		registry.heartbeat("runner-a", "instance-a", RunnerState.READY, false);
+		registry.register(runner("runner-a", "instance-a", false));
+		registry.heartbeat("runner-a", "instance-a");
 		registerAvailable("runner-b", "instance-b");
 
 		assertEquals(new RunnerAssignment("runner-b", "instance-b"), selectedRunner(selector.select(queuedJob())));
 	}
 
 	@Test
-	void stopsSelectingARunnerThatReportsItIsDraining() {
-		registerAvailable("runner-1", "instance-1");
-
-		registry.heartbeat("runner-1", "instance-1", RunnerState.DRAINING, false);
+	void blocksWhenOnlyDockerLessRunnersAreHealthy() {
+		registry.register(runner("runner-a", "instance-a", false));
+		registry.register(runner("runner-b", "instance-b", false));
 
 		assertBlocked(selector.select(queuedJob()));
 	}
 
 	@Test
-	void keepsTheReportedAvailabilityWhenALaterHeartbeatCarriesLivenessOnly() {
-		registerAvailable("runner-1", "instance-1");
+	void selectsTheSmallestIdentityIndependentlyOfRegistrationOrder() {
+		registerAvailable("runner-c", "instance-c");
+		registerAvailable("runner-a", "instance-a");
+		registerAvailable("runner-b", "instance-b");
 
-		registry.heartbeat("runner-1", "instance-1");
-
-		assertEquals(new RunnerAssignment("runner-1", "instance-1"), selectedRunner(selector.select(queuedJob())));
+		assertEquals(new RunnerAssignment("runner-a", "instance-a"), selectedRunner(selector.select(queuedJob())));
 	}
 
 	@Test
@@ -127,7 +123,7 @@ class RunnerSelectionIntegrationTest {
 		registerAvailable("runner-b", "instance-b");
 
 		clock.advance(HEARTBEAT_TIMEOUT);
-		registry.heartbeat("runner-b", "instance-b", RunnerState.READY, true);
+		registry.heartbeat("runner-b", "instance-b");
 		clock.advance(Duration.ofSeconds(1));
 
 		assertEquals(new RunnerAssignment("runner-b", "instance-b"), selectedRunner(selector.select(queuedJob())));
@@ -139,14 +135,37 @@ class RunnerSelectionIntegrationTest {
 		clock.advance(HEARTBEAT_TIMEOUT.plusSeconds(1));
 		assertBlocked(selector.select(queuedJob()));
 
-		registry.heartbeat("runner-1", "instance-1", RunnerState.READY, true);
+		registry.heartbeat("runner-1", "instance-1");
 
 		assertEquals(new RunnerAssignment("runner-1", "instance-1"), selectedRunner(selector.select(queuedJob())));
 	}
 
+	@Test
+	void recoversAfterALongPartitionEvenIfAnotherRunnerRegistersMeanwhile() {
+		registerAvailable("runner-a", "instance-a");
+		clock.advance(Duration.ofMinutes(11));
+		registerAvailable("runner-b", "instance-b");
+		assertEquals(new RunnerAssignment("runner-b", "instance-b"), selectedRunner(selector.select(queuedJob())));
+
+		assertEquals(HeartbeatDecision.ACKNOWLEDGED, registry.heartbeat("runner-a", "instance-a").decision());
+
+		assertEquals(new RunnerAssignment("runner-a", "instance-a"), selectedRunner(selector.select(queuedJob())));
+	}
+
+	@Test
+	void rejectsAConflictingInstanceAndDoesNotLetItsHeartbeatRefreshTheSelectedRunner() {
+		registerAvailable("runner-a", "instance-a");
+		assertEquals(RegistrationDecision.IDENTITY_CONFLICT,
+				registry.register(runner("runner-a", "other-instance", true)).decision());
+		clock.advance(HEARTBEAT_TIMEOUT.plusNanos(1));
+
+		assertEquals(HeartbeatDecision.UNKNOWN_RUNNER, registry.heartbeat("runner-a", "other-instance").decision());
+
+		assertBlocked(selector.select(queuedJob()));
+	}
+
 	private void registerAvailable(String runnerId, String instanceId) {
-		registry.register(runner(runnerId, instanceId));
-		registry.heartbeat(runnerId, instanceId, RunnerState.READY, true);
+		registry.register(runner(runnerId, instanceId, true));
 	}
 
 	private static RunnerAssignment selectedRunner(RunnerSelectionOutcome outcome) {
@@ -166,8 +185,8 @@ class RunnerSelectionIntegrationTest {
 		return job;
 	}
 
-	/** The identity a Runner sends at startup: not yet ready and not yet accepting work. */
-	private static RunnerInfo runner(String runnerId, String instanceId) {
+	/** Registration carries the Docker probe result before readiness is known. */
+	private static RunnerInfo runner(String runnerId, String instanceId, boolean dockerAvailable) {
 		return new RunnerInfo(
 				runnerId,
 				instanceId,
@@ -175,6 +194,6 @@ class RunnerSelectionIntegrationTest {
 				"runner.v1",
 				RunnerState.UNAVAILABLE,
 				false,
-				new RunnerCapabilities("linux", "amd64", true, List.of("docker"), Map.of()));
+				new RunnerCapabilities("linux", "amd64", dockerAvailable, List.of(), Map.of()));
 	}
 }

@@ -78,15 +78,14 @@ public class GrpcRunnerClient implements RunnerClient {
 	}
 
 	@Override
-	public JobDispatchResult dispatchJob(Job job, RunnerAssignment target) {
+	public JobDispatchResult dispatchJob(Job job) {
 		Objects.requireNonNull(job, "job must not be null");
-		Objects.requireNonNull(target, "target must not be null");
-		var request = toRunJobRequest(job, target);
+		var request = toRunJobRequest(job);
 		try {
 			var response = runnerService
 					.withDeadlineAfter(dispatchDeadline.toNanos(), TimeUnit.NANOSECONDS)
 					.runJob(request);
-			return toDispatchResult(job.id(), target, response);
+			return toDispatchResult(job.id(), response);
 		} catch (StatusRuntimeException exception) {
 			// A transport failure, and a request the Runner refuses to interpret at all,
 			// are client failures rather than Job-level rejections. A Runner that declines
@@ -99,7 +98,7 @@ public class GrpcRunnerClient implements RunnerClient {
 		}
 	}
 
-	private static RunJobRequest toRunJobRequest(Job job, RunnerAssignment target) {
+	private static RunJobRequest toRunJobRequest(Job job) {
 		var repository = job.repository();
 		var execution = job.execution();
 		return RunJobRequest.newBuilder()
@@ -115,12 +114,10 @@ public class GrpcRunnerClient implements RunnerClient {
 								.setWorkingDirectory(execution.workingDirectory())
 								.build())
 						.build())
-				.setTargetRunnerId(target.runnerId())
-				.setTargetInstanceId(target.instanceId())
 				.build();
 	}
 
-	private static JobDispatchResult toDispatchResult(JobId jobId, RunnerAssignment target, RunJobResponse response) {
+	private static JobDispatchResult toDispatchResult(JobId jobId, RunJobResponse response) {
 		// A mismatched echo means the acknowledgment cannot be attributed to this Job,
 		// so it must not be recorded against it.
 		if (!jobId.value().toString().equals(response.getJobId())) {
@@ -131,8 +128,8 @@ public class GrpcRunnerClient implements RunnerClient {
 		return switch (response.getAcceptance()) {
 			case JOB_ACCEPTED -> JobDispatchResult.accepted(
 					jobId,
-					requireTarget(target, assignment.orElseThrow(() -> new IllegalStateException(
-							"Runner accepted a job without identifying the executing process"))),
+					assignment.orElseThrow(() -> new IllegalStateException(
+							"Runner accepted a job without identifying the executing process")),
 					response.getMessage()
 			);
 			case JOB_REJECTED -> JobDispatchResult.rejected(
@@ -144,20 +141,6 @@ public class GrpcRunnerClient implements RunnerClient {
 			case JOB_ACCEPTANCE_UNSPECIFIED, UNRECOGNIZED ->
 					throw new IllegalStateException("Runner returned an unspecified job acceptance");
 		};
-	}
-
-	/**
-	 * A Runner that honors the contract declines a dispatch addressed to another
-	 * process. An acceptance from elsewhere therefore comes from a Runner that
-	 * ignored the target, and recording it would link the Job to a Runner the
-	 * Control Plane did not select.
-	 */
-	private static RunnerAssignment requireTarget(RunnerAssignment target, RunnerAssignment answering) {
-		if (!answering.equals(target)) {
-			throw new IllegalStateException("Runner " + answering.runnerId() + " instance " + answering.instanceId()
-					+ " accepted a job dispatched to Runner " + target.runnerId() + " instance " + target.instanceId());
-		}
-		return answering;
 	}
 
 	private static Optional<RunnerAssignment> toRunnerAssignment(RunJobResponse response) {
@@ -174,7 +157,6 @@ public class GrpcRunnerClient implements RunnerClient {
 		return switch (reason) {
 			case JOB_REJECTION_UNSUPPORTED_PROTOCOL_VERSION -> JobRejectionReason.UNSUPPORTED_PROTOCOL_VERSION;
 			case JOB_REJECTION_RUNNER_UNAVAILABLE -> JobRejectionReason.RUNNER_UNAVAILABLE;
-			case JOB_REJECTION_NOT_TARGET_RUNNER -> JobRejectionReason.NOT_TARGET_RUNNER;
 			case JOB_REJECTION_REASON_UNSPECIFIED, UNRECOGNIZED -> JobRejectionReason.UNKNOWN;
 		};
 	}

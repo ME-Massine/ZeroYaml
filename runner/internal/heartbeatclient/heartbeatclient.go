@@ -10,7 +10,6 @@ import (
 
 	runnerv1 "github.com/MohamedMBG/ZeroYaml/runner/gen/runner/v1"
 	"github.com/MohamedMBG/ZeroYaml/runner/internal/runneridentity"
-	"github.com/MohamedMBG/ZeroYaml/runner/internal/runnerinfoproto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -35,11 +34,7 @@ type Result struct {
 type Dialer func(address string) (*grpc.ClientConn, error)
 
 // Heartbeat reports that identity is still alive to the Control Plane at
-// address, together with its current status and whether it accepts work. The
-// Control Plane selects Runners from that reported availability, because the
-// registration request is sent before the Runner knows either value.
-//
-// The call is bounded by ctx, which the caller derives with a
+// address. The call is bounded by ctx, which the caller derives with a
 // timeout so an unreachable Control Plane cannot block the heartbeat loop.
 func Heartbeat(ctx context.Context, address string, identity runneridentity.Identity) (Result, error) {
 	return heartbeat(ctx, address, identity, defaultDialer)
@@ -55,10 +50,8 @@ func heartbeat(ctx context.Context, address string, identity runneridentity.Iden
 	client := runnerv1.NewRunnerRegistrationServiceClient(connection)
 
 	response, err := client.Heartbeat(ctx, &runnerv1.HeartbeatRequest{
-		RunnerId:      identity.RunnerID,
-		InstanceId:    identity.InstanceID,
-		Status:        runnerinfoproto.StatusToProto(identity.Status),
-		AcceptingWork: identity.AcceptingWork,
+		RunnerId:   identity.RunnerID,
+		InstanceId: identity.InstanceID,
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("send heartbeat to control plane at %s: %w", address, err)
