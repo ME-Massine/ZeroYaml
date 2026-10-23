@@ -2,20 +2,26 @@ package io.zeroyaml.controlplane.registration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import io.zeroyaml.controlplane.domain.job.ExecutionDefinition;
 import io.zeroyaml.controlplane.domain.job.Job;
+import io.zeroyaml.controlplane.domain.job.JobStatus;
 import io.zeroyaml.controlplane.domain.job.RepositoryReference;
 import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
 import io.zeroyaml.controlplane.runner.RunnerCapabilities;
@@ -70,6 +76,39 @@ class RunnerSelectionIntegrationTest {
 	@Test
 	void blocksWhenNoRunnerIsRegistered() {
 		assertBlocked(selector.select(queuedJob()));
+	}
+
+	@ParameterizedTest
+	@MethodSource("malformedIdentities")
+	void skipsMalformedIdentitiesBeforeRankingOnEverySelection(String runnerId, String instanceId) {
+		assertEquals(RegistrationDecision.ACCEPTED, registry.register(runner(runnerId, instanceId, true)).decision());
+		assertEquals(RunnerLiveness.HEALTHY, registry.livenessOf(runnerId));
+		registerAvailable("runner-z", "instance-z");
+		var job = queuedJob();
+
+		assertEquals(new RunnerAssignment("runner-z", "instance-z"), selectedRunner(selector.select(job)));
+		assertEquals(new RunnerAssignment("runner-z", "instance-z"), selectedRunner(selector.select(job)));
+		assertEquals(JobStatus.QUEUED, job.status());
+		assertTrue(job.runnerAssignment().isEmpty());
+	}
+
+	@ParameterizedTest
+	@MethodSource("malformedIdentities")
+	void blocksWhenOnlyAMalformedIdentityIsRegistered(String runnerId, String instanceId) {
+		assertEquals(RegistrationDecision.ACCEPTED, registry.register(runner(runnerId, instanceId, true)).decision());
+		var job = queuedJob();
+
+		assertBlocked(selector.select(job));
+		assertEquals(JobStatus.QUEUED, job.status());
+		assertTrue(job.runnerAssignment().isEmpty());
+	}
+
+	private static Stream<Arguments> malformedIdentities() {
+		return Stream.of(
+				Arguments.of("", "instance-a"),
+				Arguments.of(" \t ", "instance-a"),
+				Arguments.of("runner-a", ""),
+				Arguments.of("runner-a", " \t "));
 	}
 
 	@Test

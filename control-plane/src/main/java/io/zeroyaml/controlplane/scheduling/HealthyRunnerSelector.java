@@ -15,10 +15,12 @@ import io.zeroyaml.controlplane.registration.RunnerRegistry;
  * First scheduling strategy: pick the available registered Runner with the
  * lexicographically smallest {@code runnerId}.
  *
- * <p>Eligibility is the registry's decision. A Runner is eligible exactly when
- * {@link RunnerRegistry#availableRunners()} lists it: its liveness is healthy
- * and its startup Docker probe succeeded. A Docker-less Runner therefore
- * cannot keep Jobs away from a Docker-capable Runner. The registration's state
+ * <p>Availability is the registry's decision:
+ * {@link RunnerRegistry#availableRunners()} lists Runners whose liveness is healthy
+ * and whose startup Docker probe succeeded. The selector also requires non-blank
+ * Runner and instance identities so a dispatch context can be constructed.
+ * A Docker-less Runner therefore cannot keep Jobs away from a Docker-capable
+ * Runner. The registration's state
  * and accepting-work flag predate the registration acknowledgment and are not
  * used as readiness signals.
  *
@@ -50,6 +52,9 @@ class HealthyRunnerSelector implements RunnerSelector {
 		}
 
 		return registry.availableRunners().stream()
+				// Registration accepts blank identities; exclude them before they can outrank a valid Runner.
+				.filter(registered -> !registered.runner().runnerId().isBlank()
+						&& !registered.runner().instanceId().isBlank())
 				.min(BY_RUNNER_ID)
 				.map(registered -> toSelectedOutcome(job, registered))
 				.orElseGet(() -> new RunnerSelectionOutcome.NoAvailableRunner(

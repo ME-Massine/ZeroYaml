@@ -23,6 +23,13 @@ Runners satisfying both conditions:
 The registry judges all entries at one instant. The selector uses that snapshot
 without repeating the liveness calculation.
 
+Before ranking that snapshot, the selector excludes entries with a blank
+`runnerId` or `instanceId`. Registration currently accepts empty and whitespace-only
+identities, but a dispatch assignment requires both to be non-blank. Such an entry
+cannot prevent a valid Runner from being selected; if every available entry has
+a malformed identity, selection returns `NoAvailableRunner` and leaves the Job
+queued and unassigned.
+
 Registration carries `state = UNAVAILABLE` and `accepting_work = false` because
 it precedes the registration acknowledgment. The existing heartbeat carries
 identity only, so those two snapshot fields never become current readiness
