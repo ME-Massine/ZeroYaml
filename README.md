@@ -27,6 +27,11 @@ troubleshooting for the webhook, gRPC, Docker, and PostgreSQL boundaries.
 
 ## Architecture
 
+Runner job output is streamed to the Control Plane with bounded capture and
+explicit truncation and completion metadata. See
+[Runner job logs](./docs/architecture/runner-job-logs.md) for the contract and
+retention limits.
+
 ZeroYAML is divided into two main planes:
 
 ### Control Plane

@@ -15,6 +15,7 @@ import (
 	"github.com/MohamedMBG/ZeroYaml/runner/internal/grpcserver"
 	"github.com/MohamedMBG/ZeroYaml/runner/internal/heartbeat"
 	"github.com/MohamedMBG/ZeroYaml/runner/internal/jobexecution"
+	"github.com/MohamedMBG/ZeroYaml/runner/internal/joblogs"
 	"github.com/MohamedMBG/ZeroYaml/runner/internal/jobstatus"
 	"github.com/MohamedMBG/ZeroYaml/runner/internal/registrationclient"
 	"github.com/MohamedMBG/ZeroYaml/runner/internal/runnerconfig"
@@ -100,7 +101,7 @@ func run() error {
 	// container cleanup and status reporting.
 	dispatcher := jobexecution.NewDispatcher(
 		ctx,
-		sandbox.New(dockerBinary, logger),
+		sandbox.New(dockerBinary, logger, joblogs.NewReporter(cfg.ControlPlaneAddress, identity, cfg.StatusReportTimeout, logger)),
 		jobstatus.NewReporter(cfg.ControlPlaneAddress, identity, cfg.StatusReportTimeout, logger),
 		sandbox.Settings{
 			Image:           cfg.JobImage,

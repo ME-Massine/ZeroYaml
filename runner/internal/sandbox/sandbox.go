@@ -28,6 +28,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MohamedMBG/ZeroYaml/runner/internal/joblogs"
 )
 
 // defaultCleanupTimeout bounds each removal command. Removal runs after the
@@ -80,14 +82,20 @@ type dockerFunc func(ctx context.Context, args ...string) (string, error)
 // one instance may run concurrent executions.
 type Sandbox struct {
 	docker         dockerFunc
+	stream         dockerStreamFunc
+	logs           joblogs.Sink
 	newID          func() (string, error)
 	cleanupTimeout time.Duration
 	logger         *slog.Logger
 }
 
-// New creates a Sandbox that drives the Docker CLI found at dockerBinary.
-func New(dockerBinary string, logger *slog.Logger) *Sandbox {
-	return newSandbox(cliDocker(dockerBinary), newExecutionID, defaultCleanupTimeout, logger)
+// New creates a Sandbox that drives the Docker CLI found at dockerBinary and
+// delivers bounded Job output to logs. A nil sink drains output without retention.
+func New(dockerBinary string, logger *slog.Logger, logs joblogs.Sink) *Sandbox {
+	s := newSandbox(cliDocker(dockerBinary), newExecutionID, defaultCleanupTimeout, logger)
+	s.stream = cliDockerStream(dockerBinary)
+	s.logs = logs
+	return s
 }
 
 func newSandbox(
@@ -111,21 +119,29 @@ func newSandbox(
 // Cancelling ctx stops the execution and yields OutcomeCancelled; exceeding
 // spec.Timeout yields OutcomeTimedOut.
 func (s *Sandbox) Run(ctx context.Context, spec Spec) Result {
+	runCtx, cancel := context.WithTimeout(ctx, spec.Timeout)
+	defer cancel()
+	capture := joblogs.NewCapture(runCtx, spec.JobID, s.logs)
+	interrupted := false
+	defer func() {
+		if err := capture.Close(context.WithoutCancel(ctx), interrupted); err != nil {
+			s.logger.WarnContext(ctx, "job output final marker was not acknowledged")
+		}
+	}()
 	executionID, err := s.newID()
 	if err != nil {
+		interrupted = true
 		return Result{Outcome: OutcomeExecutionError, Message: fmt.Sprintf("generate execution identifier: %v", err)}
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, spec.Timeout)
-	defer cancel()
-
-	result := s.run(ctx, runCtx, executionID, spec)
+	result := s.run(ctx, runCtx, executionID, spec, capture)
 	result.ExecutionID = executionID
+	interrupted = interrupted || result.Outcome == OutcomeCancelled || result.Outcome == OutcomeTimedOut || result.Outcome == OutcomeExecutionError
 
 	return result
 }
 
-func (s *Sandbox) run(ctx context.Context, runCtx context.Context, executionID string, spec Spec) Result {
+func (s *Sandbox) run(ctx context.Context, runCtx context.Context, executionID string, spec Spec, capture *joblogs.Capture) Result {
 	names := newResourceNames(executionID)
 
 	if _, err := s.docker(runCtx, volumeCreateArgs(names)...); err != nil {
@@ -139,7 +155,7 @@ func (s *Sandbox) run(ctx context.Context, runCtx context.Context, executionID s
 	}
 	defer s.remove(ctx, executionID, "workspace volume", "volume", "rm", "--force", names.volume)
 
-	checkoutExitCode, err := s.runContainer(ctx, runCtx, executionID, names.checkout, checkoutCreateArgs(spec, names))
+	checkoutExitCode, err := s.runContainer(ctx, runCtx, executionID, names.checkout, checkoutCreateArgs(spec, names), nil)
 	if err != nil {
 		return s.interrupted(ctx, runCtx, spec, "source checkout", err)
 	}
@@ -153,7 +169,7 @@ func (s *Sandbox) run(ctx context.Context, runCtx context.Context, executionID s
 		}
 	}
 
-	exitCode, err := s.runContainer(ctx, runCtx, executionID, names.job, jobCreateArgs(spec, names))
+	exitCode, err := s.runContainer(ctx, runCtx, executionID, names.job, jobCreateArgs(spec, names), capture)
 	if err != nil {
 		return s.interrupted(ctx, runCtx, spec, "job command", err)
 	}
@@ -178,6 +194,7 @@ func (s *Sandbox) runContainer(
 	executionID string,
 	name string,
 	createArgs []string,
+	capture *joblogs.Capture,
 ) (int32, error) {
 	output, err := s.docker(runCtx, createArgs...)
 	if err != nil {
@@ -198,6 +215,14 @@ func (s *Sandbox) runContainer(
 
 	if _, err := s.docker(runCtx, "start", containerID); err != nil {
 		return 0, err
+	}
+	if capture != nil && s.stream != nil {
+		// Following after start also reads output from a command that already
+		// exited. Checkout output is excluded because it can contain credentials.
+		if err := s.stream(runCtx, capture.Writer(joblogs.Stdout), capture.Writer(joblogs.Stderr), "logs", "--follow", containerID); err != nil {
+			capture.MarkIncomplete()
+			s.logger.WarnContext(ctx, "job log capture interrupted", slog.String("execution_id", executionID))
+		}
 	}
 
 	output, err = s.docker(runCtx, "wait", containerID)

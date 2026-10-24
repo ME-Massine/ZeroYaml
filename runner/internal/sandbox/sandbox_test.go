@@ -38,6 +38,10 @@ func TestJobCreateArgsPassTheCommandAndWorkingDirectoryExplicitly(t *testing.T) 
 	assertOption(t, options, "--memory-swap", "2147483648")
 	assertOption(t, options, "--pids-limit", "512")
 	assertOption(t, options, "--pull", "missing")
+	assertOption(t, options, "--log-driver", "local")
+	assertOption(t, options, "--log-opt", "max-size=10m")
+	assertOption(t, options, "--log-opt", "max-file=1")
+	assertOption(t, options, "--log-opt", "compress=false")
 
 	if slices.Contains(options, "--privileged") {
 		t.Error("job container must never be privileged")

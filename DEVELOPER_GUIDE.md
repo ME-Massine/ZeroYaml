@@ -816,6 +816,16 @@ report when an accepted Job starts and one terminal report when it ends.
 
 ### Runner Docker execution
 
+Job stdout and stderr are streamed through `JobLogService.AppendJobLog` to the
+Control Plane's shared Runner-facing endpoint. Capture retains at most 1 MiB
+or 256 data chunks per Job, followed by a final marker identifying truncation
+or interruption. Delivery uses `ZEROYAML_RUNNER_STATUS_REPORT_TIMEOUT` for each
+call; failures do not change execution status. The Control Plane retains at
+most 32 Jobs' logs in memory through `JobLogStore.snapshot`; restart or FIFO
+eviction loses them. There is no REST/UI log viewer. Raw command bytes are
+excluded from operational logs; arbitrary secrets printed by a command are
+not automatically redacted. See [Runner job logs](./docs/architecture/runner-job-logs.md).
+
 `runner/internal/sandbox` runs every accepted Job in Docker; the Runner never
 executes a Job command on its host. At startup the Runner probes the Docker
 daemon with `docker version`. If the daemon does not answer, the Runner keeps

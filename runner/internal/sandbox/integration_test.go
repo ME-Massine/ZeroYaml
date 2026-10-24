@@ -20,7 +20,7 @@ const dockerTestsVariable = "ZEROYAML_RUNNER_DOCKER_TESTS"
 
 func TestDockerExecutionOfALocalRepository(t *testing.T) {
 	root, revision := newDockerTestRepository(t)
-	executor := New("docker", slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	executor := New("docker", slog.New(slog.NewTextHandler(os.Stderr, nil)), nil)
 
 	testCases := []struct {
 		name             string

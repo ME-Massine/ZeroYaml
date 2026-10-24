@@ -3,7 +3,9 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -120,12 +122,36 @@ func jobCreateArgs(spec Spec, names resourceNames) []string {
 	args := containerCreateArgs(names.job, names, spec.Limits)
 	args = append(
 		args,
+		"--log-driver", "local",
+		"--log-opt", "max-size=10m",
+		"--log-opt", "max-file=1",
+		"--log-opt", "compress=false",
 		"--workdir", spec.WorkingDirectory,
 		"--entrypoint", spec.Command[0],
 		spec.Image,
 	)
 
 	return append(args, spec.Command[1:]...)
+}
+
+// dockerStreamFunc copies Docker's non-TTY stdout/stderr pipes into bounded
+// writers. The CLI demultiplexes container frames; observation order between
+// the two OS pipes cannot reconstruct the command's exact write order.
+type dockerStreamFunc func(context.Context, io.Writer, io.Writer, ...string) error
+
+func cliDockerStream(dockerBinary string) dockerStreamFunc {
+	return func(ctx context.Context, stdout io.Writer, stderr io.Writer, args ...string) error {
+		// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+		command := exec.CommandContext(ctx, dockerBinary, args...)
+		command.Stdout = stdout
+		command.Stderr = stderr
+		command.WaitDelay = commandWaitDelay
+		if err := command.Run(); err != nil {
+			// No command output is embedded in execution diagnostics.
+			return errors.New("docker output stream failed")
+		}
+		return nil
+	}
 }
 
 // Probe reports whether the Docker daemon behind dockerBinary is reachable,
