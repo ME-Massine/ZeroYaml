@@ -1,6 +1,6 @@
 # ZeroYAML Project Progress
 
-Last updated: 2026-10-23 (Phase 2: review fixes for Runner selection, pull request #268)
+Last updated: 2026-10-23 (Phase 2: deterministic pipeline inference, issue #22)
 
 Current phase: 2
 
@@ -60,6 +60,7 @@ The Runner Docker execution sandbox for issue #25 is merged into `main`. A Runne
 
 ## In progress
 
+- Issue #22, first deterministic pipeline inference strategy (local, unmerged): `PipelineInferrer` maps a `RepositoryReference` and a `RepositorySnapshot` (root file listing) to `Inferred`, `Unsupported`, or `Ambiguous`. A root `pom.xml` yields ordered `build` and `test` steps; `pom.xml` combined with another known build file, or several unsupported build files, is `Ambiguous`; anything else is `Unsupported`. The pipeline identity is derived from the source, so the same state gives an equal pipeline. Nothing is executed and no Runner is chosen. Nothing calls the inferrer yet, and obtaining the file listing for a push is not implemented; both belong to #23 and #30. Control Plane `mvnw.cmd --batch-mode -o verify` passed 335 tests with no failures, errors, or skips. See [`docs/architecture/pipeline-inference.md`](./architecture/pipeline-inference.md).
 - Issue #24, minimal healthy Runner selection (pull request #268, proposed and unmerged): `RunnerRegistry.availableRunners()` lists registered Runners with healthy liveness and a successful startup Docker probe. `HealthyRunnerSelector` excludes blank `runnerId` or `instanceId` values before deterministically selecting the smallest valid `runnerId`, returning a sealed `Selected` outcome with a `JobDispatchContext` or `NoAvailableRunner` while leaving the Job queued and unassigned. Registration state and `acceptingWork` predate the acknowledgment and are not readiness signals. Review fixes remove dispatch targeting, heartbeat extensions, registration-level blank-identity validation, and registry eviction from this PR; protocol and Runner behavior match `main`. The selector has no production caller. See [`docs/architecture/runner-selection.md`](./architecture/runner-selection.md).
 - Issue #24 still declares #23 as a prerequisite, and #23 remains open. The existing PR is being repaired for review; merging remains blocked until #23 completes or a maintainer records a dependency decision. This update does not mark #24 done or change the active phase.
 - Blank-identity review regression for #268 on 2026-10-23: eight new cases against the real registry reproduced `IllegalArgumentException` before the fix for empty and whitespace-only Runner or instance identities. Filtering before ranking now preserves repeatable selection of a valid Runner and returns `NoAvailableRunner` when only malformed identities exist; both leave the Job queued and unassigned. Control Plane `mvnw.cmd --batch-mode verify` passed 314 tests with no failures, errors, or skips, including PostgreSQL integration tests and all eight regressions. The first focused-test invocation encountered a transient protobuf temporary-directory cleanup error; the retry reached and reproduced all eight failures before the fix. Runner and protocol files are unchanged by this follow-up. The remote phase-gate failure remains pending a user edit to the PR body, which still references a Phase 6 issue; no later-phase behavior is implemented here.
@@ -81,7 +82,7 @@ The Runner Docker execution sandbox for issue #25 is merged into `main`. A Runne
 
 - Provision `ZEROYAML_DATABASE_PASSWORD` (and the URL and user outside local development) in every environment that runs the Control Plane, because startup fails without a reachable database since #19.
 - Provision a webhook secret (`ZEROYAML_GITHUB_WEBHOOK_SECRET`) in every environment that runs the Control Plane, because startup fails without one since #17.
-- Infer a pipeline (#22) from the merged event normalization (#20) and minimal pipeline model (#21), then create executable Jobs (#23) before joining selection and dispatch.
+- Merge pipeline inference (#22), then create executable Jobs (#23) and supply the repository file listing they need before joining selection and dispatch.
 - Carry the Job image and timeout in the `runner.v1` contract so they come from the Job definition instead of Runner configuration; this is a cross-service contract change that needs its own issue.
 - Stream and capture Job container logs (#26) on top of the sandbox.
 - Join the two halves of the local workflow with the first end-to-end scenario (#30) and its automated test (#31), then correct `docs/local-development-workflow.md` against that test and close out the remaining acceptance criteria of #32.
