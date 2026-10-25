@@ -27,11 +27,6 @@ troubleshooting for the webhook, gRPC, Docker, and PostgreSQL boundaries.
 
 ## Architecture
 
-Runner job output is streamed to the Control Plane with bounded capture and
-explicit truncation and completion metadata. See
-[Runner job logs](./docs/architecture/runner-job-logs.md) for the contract and
-retention limits.
-
 ZeroYAML is divided into two main planes:
 
 ### Control Plane
@@ -59,6 +54,11 @@ Technology:
 - Go
 - Docker
 - gRPC
+
+Runner job output can be delivered to the Control Plane through a dedicated
+mTLS endpoint with bounded capture and explicit completion metadata. See
+[Runner job logs](./docs/architecture/runner-job-logs.md) for configuration,
+ordering, and retention limits.
 
 ### Infrastructure
 

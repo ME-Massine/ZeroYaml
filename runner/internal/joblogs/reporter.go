@@ -2,36 +2,71 @@ package joblogs
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	runnerv1 "github.com/MohamedMBG/ZeroYaml/runner/gen/runner/v1"
 	"github.com/MohamedMBG/ZeroYaml/runner/internal/runneridentity"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Reporter sends bounded output chunks without copying payloads into
-// operational logs. It holds no mutable per-Job state and supports concurrent Jobs.
-type Reporter struct {
-	address  string
-	identity runneridentity.Identity
-	timeout  time.Duration
-	logger   *slog.Logger
-	dial     func(string) (*grpc.ClientConn, error)
+// Endpoint identifies the dedicated mTLS log ingress. Empty disables delivery.
+// Certificate, PrivateKey, and CA are file paths supplied outside source control.
+type Endpoint struct {
+	Address     string
+	Certificate string
+	PrivateKey  string
+	CA          string
 }
 
-// NewReporter uses the same Control Plane endpoint and timeout as status reports.
-// Each call owns its connection and deadline. No output is retried or persisted
-// on the Runner; delivery failures are visible through metadata-only warnings.
-func NewReporter(address string, identity runneridentity.Identity, timeout time.Duration, logger *slog.Logger) *Reporter {
-	return &Reporter{address: address, identity: identity, timeout: timeout, logger: logger,
-		dial: func(address string) (*grpc.ClientConn, error) {
-			return grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		}}
+// Reporter owns one reusable, concurrency-safe client connection for all Jobs.
+// Close must run after execution drain, so final markers can still be sent.
+type Reporter struct {
+	connection *grpc.ClientConn
+	client     runnerv1.JobLogServiceClient
+	identity   runneridentity.Identity
+	timeout    time.Duration
+	logger     *slog.Logger
 }
+
+// NewReporter configures mTLS without an insecure fallback. A wholly empty
+// endpoint disables delivery; partial or invalid TLS configuration fails startup.
+func NewReporter(endpoint Endpoint, identity runneridentity.Identity, timeout time.Duration, logger *slog.Logger) (*Reporter, error) {
+	if endpoint == (Endpoint{}) {
+		return nil, nil
+	}
+	if endpoint.Address == "" || endpoint.Certificate == "" || endpoint.PrivateKey == "" || endpoint.CA == "" {
+		return nil, fmt.Errorf("job logs require ZEROYAML_JOB_LOGS_ADDRESS, CERTIFICATE, PRIVATE_KEY, and CA")
+	}
+	certificate, err := tls.LoadX509KeyPair(endpoint.Certificate, endpoint.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("load job log client certificate and key: %w", err)
+	}
+	ca, err := os.ReadFile(endpoint.CA)
+	if err != nil {
+		return nil, fmt.Errorf("read job log server CA: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(ca) {
+		return nil, fmt.Errorf("job log CA must contain PEM certificates")
+	}
+	connection, err := grpc.NewClient(endpoint.Address, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+		MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{certificate},
+	})))
+	if err != nil {
+		return nil, fmt.Errorf("create job log client: %w", err)
+	}
+	return &Reporter{connection: connection, client: runnerv1.NewJobLogServiceClient(connection), identity: identity, timeout: timeout, logger: logger}, nil
+}
+
+// Close releases the connection after every execution has drained.
+func (r *Reporter) Close() error { return r.connection.Close() }
 
 // Append sends a single record and logs only correlation metadata on failure.
 func (r *Reporter) Append(ctx context.Context, record Record) error {
@@ -50,12 +85,7 @@ func (r *Reporter) Append(ctx context.Context, record Record) error {
 }
 
 func (r *Reporter) send(ctx context.Context, record Record) error {
-	connection, err := r.dial(r.address)
-	if err != nil {
-		return fmt.Errorf("create log connection: %w", err)
-	}
-	defer connection.Close()
-	_, err = runnerv1.NewJobLogServiceClient(connection).AppendJobLog(ctx, &runnerv1.AppendJobLogRequest{
+	_, err := r.client.AppendJobLog(ctx, &runnerv1.AppendJobLogRequest{
 		ProtocolVersion: r.identity.ProtocolVersion, JobId: record.JobID, RunnerId: r.identity.RunnerID, InstanceId: r.identity.InstanceID,
 		Sequence: record.Sequence, ObservedAt: timestamppb.New(record.ObservedAt), Stream: runnerv1.JobLogStream(record.Stream), Content: record.Content,
 		EndOfOutput: record.EndOfOutput, Truncated: record.Truncated, Incomplete: record.Incomplete,

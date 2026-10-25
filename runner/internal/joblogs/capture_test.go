@@ -96,13 +96,13 @@ func TestCaptureBoundsTinyWritesAcrossBothStreams(t *testing.T) {
 	}
 }
 
-func TestDeliveryFailureSuppressesDataAndMarksFinalIncomplete(t *testing.T) {
+func TestDeliveryFailureAllowsLaterDataAndMarksFinalIncomplete(t *testing.T) {
 	sink := &recordingSink{failAt: 1}
 	capture := NewCapture(context.Background(), "job", sink)
 	capture.Writer(Stdout).Write(make([]byte, MaxOutputBytes*2))
 	capture.Writer(Stderr).Write([]byte("drained"))
 	capture.Close(context.Background(), false)
-	if len(sink.records) != 2 || !sink.records[1].EndOfOutput || !sink.records[1].Incomplete || sink.records[1].Sequence != 2 {
+	if len(sink.records) != MaxChunks+1 || !sink.records[MaxChunks].EndOfOutput || !sink.records[MaxChunks].Incomplete || !sink.records[MaxChunks].Truncated || sink.records[MaxChunks].Sequence != MaxChunks+1 {
 		t.Fatal("delivery failure lifecycle lost")
 	}
 }
@@ -115,5 +115,53 @@ func TestEmptyAndInterruptedCapturesHaveFinalMarkers(t *testing.T) {
 		if len(sink.records) != 1 || !sink.records[0].EndOfOutput || sink.records[0].Incomplete != interrupted {
 			t.Fatal("empty capture marker lost")
 		}
+	}
+}
+
+func TestCaptureRecoversAfterSingleFailedChunk(t *testing.T) {
+	sink := &recordingSink{failAt: 1}
+	capture := NewCapture(context.Background(), "job", sink)
+	capture.Writer(Stdout).Write([]byte("lost"))
+	capture.Writer(Stderr).Write([]byte("delivered"))
+	capture.Close(context.Background(), false)
+	if len(sink.records) != 3 || string(sink.records[1].Content) != "delivered" || !sink.records[2].Incomplete || !sink.records[2].Truncated {
+		t.Fatal("delivery did not recover with explicit loss metadata")
+	}
+}
+
+type sinkFunc func(context.Context, Record) error
+
+func (f sinkFunc) Append(ctx context.Context, record Record) error { return f(ctx, record) }
+
+func TestCloseCancelsBlockedDeliveryAndMarkIncompleteDoesNotWait(t *testing.T) {
+	entered := make(chan struct{})
+	finished := make(chan Record, 1)
+	capture := NewCapture(context.Background(), "job", sinkFunc(func(ctx context.Context, record Record) error {
+		if record.EndOfOutput {
+			finished <- record
+			return nil
+		}
+		close(entered)
+		<-ctx.Done()
+		return ctx.Err()
+	}))
+	written := make(chan struct{})
+	go func() { capture.Writer(Stdout).Write([]byte("pending")); close(written) }()
+	<-entered
+	marked := make(chan struct{})
+	go func() { capture.MarkIncomplete(); close(marked) }()
+	select {
+	case <-marked:
+	case <-time.After(time.Second):
+		t.Fatal("state update blocked on network")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := capture.Close(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	<-written
+	if final := <-finished; !final.Incomplete || !final.Truncated || final.Sequence != 2 {
+		t.Fatalf("final = %+v", final)
 	}
 }

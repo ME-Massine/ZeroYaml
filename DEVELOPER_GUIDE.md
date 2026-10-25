@@ -631,8 +631,9 @@ reachable, and it has a free execution slot; see
 
 ### Runner-facing gRPC endpoint
 
-The Control Plane serves every gRPC service a Runner calls on one endpoint, so a
-Runner is configured with a single Control Plane address:
+The Control Plane shares one endpoint for registration, heartbeats, and execution
+status. Optional Job log ingress uses a separate mTLS endpoint; configuration is
+listed in [Runner job logs](./docs/architecture/runner-job-logs.md).
 
 | Property | Default | Purpose |
 | --- | --- | --- |
@@ -640,8 +641,7 @@ Runner is configured with a single Control Plane address:
 | `zeroyaml.registration.heartbeat-timeout` | `15s` | Time without a heartbeat before a Runner is reported `UNAVAILABLE` |
 
 The setting keeps its `zeroyaml.registration` prefix so deployed configuration
-and Runner environment variables stay valid as services are added to the
-endpoint.
+and Runner environment variables stay valid for registration and status reports.
 
 `JobExecutionStatusService.ReportJobStatus` is how a Runner reports what one
 execution did. The Control Plane owns authoritative Job state: it validates
@@ -816,13 +816,15 @@ report when an accepted Job starts and one terminal report when it ends.
 
 ### Runner Docker execution
 
-Job stdout and stderr are streamed through `JobLogService.AppendJobLog` to the
-Control Plane's shared Runner-facing endpoint. Capture retains at most 1 MiB
-or 256 data chunks per Job, followed by a final marker identifying truncation
+Job stdout and stderr can be delivered through `JobLogService.AppendJobLog`
+to a dedicated mTLS listener, disabled until certificates are configured on both
+services. The existing registration/status endpoint does not serve logs. Capture
+retains at most 1 MiB or 256 data chunks per Job, followed by a final marker identifying truncation
 or interruption. Delivery uses `ZEROYAML_RUNNER_STATUS_REPORT_TIMEOUT` for each
 call; failures do not change execution status. The Control Plane retains at
-most 32 Jobs' logs in memory through `JobLogStore.snapshot`; restart or FIFO
-eviction loses them. There is no REST/UI log viewer. Raw command bytes are
+most 32 Jobs' logs in memory through `JobLogStore.snapshot`. Only finished
+output can be evicted; full active retention refuses new Jobs' logs. Restart
+loses all logs. There is no REST/UI log viewer. Raw command bytes are
 excluded from operational logs; arbitrary secrets printed by a command are
 not automatically redacted. See [Runner job logs](./docs/architecture/runner-job-logs.md).
 
@@ -853,7 +855,8 @@ Pop-Location
 ```
 
 The Go protobuf bindings can be regenerated from the repository root after
-installing the pinned `protoc-gen-go` and `protoc-gen-go-grpc` tool versions:
+installing `protoc` v36.0, `protoc-gen-go` v1.36.12, and
+`protoc-gen-go-grpc` v1.6.2 (the checked-in Go bindings' pinned versions):
 
 ```powershell
 protoc -I proto `

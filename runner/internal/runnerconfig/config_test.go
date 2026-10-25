@@ -373,3 +373,27 @@ func TestLoadRejectsInvalidExecutionConfiguration(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadReadsOptionalJobLogTLSConfiguration(t *testing.T) {
+	for _, name := range []string{"ZEROYAML_JOB_LOGS_ADDRESS", "ZEROYAML_JOB_LOGS_CERTIFICATE", "ZEROYAML_JOB_LOGS_PRIVATE_KEY", "ZEROYAML_JOB_LOGS_CA"} {
+		unsetForTest(t, name)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.JobLogs.Address != "" || cfg.JobLogs.Certificate != "" || cfg.JobLogs.PrivateKey != "" || cfg.JobLogs.CA != "" {
+		t.Fatal("log delivery must be disabled by default")
+	}
+	t.Setenv("ZEROYAML_JOB_LOGS_ADDRESS", "localhost:50053")
+	t.Setenv("ZEROYAML_JOB_LOGS_CERTIFICATE", "runner.pem")
+	t.Setenv("ZEROYAML_JOB_LOGS_PRIVATE_KEY", "runner-key.pem")
+	t.Setenv("ZEROYAML_JOB_LOGS_CA", "ca.pem")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.JobLogs.Address != "localhost:50053" || cfg.JobLogs.Certificate != "runner.pem" || cfg.JobLogs.PrivateKey != "runner-key.pem" || cfg.JobLogs.CA != "ca.pem" {
+		t.Fatal("log TLS configuration was not loaded")
+	}
+}

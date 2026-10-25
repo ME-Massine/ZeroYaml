@@ -34,10 +34,12 @@ func testReporter(t *testing.T, service logService, output *bytes.Buffer) *Repor
 	runnerv1.RegisterJobLogServiceServer(server, service)
 	go server.Serve(listener)
 	t.Cleanup(func() { server.Stop(); listener.Close() })
-	reporter := NewReporter("passthrough:///test", runneridentity.Identity{RunnerID: "runner", InstanceID: "instance", ProtocolVersion: "runner.v1"}, time.Second, slog.New(slog.NewTextHandler(output, nil)))
-	reporter.dial = func(address string) (*grpc.ClientConn, error) {
-		return grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }))
+	connection, err := grpc.NewClient("passthrough:///test", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }))
+	if err != nil {
+		t.Fatal(err)
 	}
+	reporter := &Reporter{connection: connection, client: runnerv1.NewJobLogServiceClient(connection), identity: runneridentity.Identity{RunnerID: "runner", InstanceID: "instance", ProtocolVersion: "runner.v1"}, timeout: time.Second, logger: slog.New(slog.NewTextHandler(output, nil))}
+	t.Cleanup(func() { reporter.Close() })
 	return reporter
 }
 
@@ -61,7 +63,7 @@ func TestReporterSendsChunkIdentityAndLifecycleOverTransport(t *testing.T) {
 		}
 	}
 	first, last := <-requests, <-requests
-	if first.GetJobId() != "job" || first.GetRunnerId() != "runner" || first.GetInstanceId() != "instance" || first.GetProtocolVersion() != "runner.v1" || first.GetStream() != runnerv1.JobLogStream_JOB_LOG_STDERR || !bytes.Equal(first.GetContent(), []byte{0xff, '\n'}) || !first.GetObservedAt().AsTime().Equal(now) {
+	if first.GetJobId() != "job" || first.GetRunnerId() != "runner" || first.GetInstanceId() != "instance" || first.GetProtocolVersion() != "runner.v1" || first.GetStream() != runnerv1.JobLogStream_JOB_LOG_STREAM_STDERR || !bytes.Equal(first.GetContent(), []byte{0xff, '\n'}) || !first.GetObservedAt().AsTime().Equal(now) {
 		t.Fatalf("request = %v", first)
 	}
 	if !last.GetEndOfOutput() || !last.GetTruncated() || !last.GetIncomplete() || last.GetSequence() != 2 {

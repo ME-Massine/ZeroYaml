@@ -6,7 +6,7 @@ import io.zeroyaml.controlplane.domain.job.JobId;
 
 /** Application boundary for bounded command output retention, separate from Job state. */
 public interface JobLogStore {
-	/** Appends one contiguous observation, or an incomplete final marker with a gap. */
+	/** Appends one increasing observation; sequence gaps require an incomplete final marker. */
 	void append(JobLogRecord record);
 
 	/** Returns an immutable ordered snapshot; empty also covers unknown or evicted logs. */

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MohamedMBG/ZeroYaml/runner/internal/joblogs"
 )
 
 const (
@@ -80,6 +82,9 @@ const (
 
 // Config contains startup configuration for the Runner process.
 type Config struct {
+	// JobLogs configures optional authenticated output delivery.
+	JobLogs joblogs.Endpoint
+
 	GRPCAddress string
 	RunnerID    string
 	Version     string
@@ -160,6 +165,12 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
+		JobLogs: joblogs.Endpoint{
+			Address:     valueFromEnv("ZEROYAML_JOB_LOGS_ADDRESS", ""),
+			Certificate: valueFromEnv("ZEROYAML_JOB_LOGS_CERTIFICATE", ""),
+			PrivateKey:  valueFromEnv("ZEROYAML_JOB_LOGS_PRIVATE_KEY", ""),
+			CA:          valueFromEnv("ZEROYAML_JOB_LOGS_CA", ""),
+		},
 		GRPCAddress:         valueFromEnv(envGRPCAddress, defaultGRPCAddress),
 		RunnerID:            valueFromEnv(envRunnerID, defaultRunnerID),
 		Version:             valueFromEnv(envVersion, defaultVersion),

@@ -3,8 +3,6 @@ package io.zeroyaml.controlplane.execution;
 import java.time.Instant;
 import java.util.UUID;
 
-import org.springframework.stereotype.Component;
-
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import io.zeroyaml.contracts.runner.v1.AppendJobLogRequest;
@@ -14,8 +12,7 @@ import io.zeroyaml.controlplane.domain.job.JobId;
 import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
 import io.zeroyaml.controlplane.runner.RunnerProtocolVersion;
 
-/** Bounded log ingress on the shared Runner-facing listener; never logs payloads. */
-@Component
+/** Bounded log ingress registered only on the authenticated TLS listener. */
 class GrpcJobLogService extends JobLogServiceGrpc.JobLogServiceImplBase {
 	private final JobLogRecorder recorder;
 
@@ -24,12 +21,24 @@ class GrpcJobLogService extends JobLogServiceGrpc.JobLogServiceImplBase {
 	@Override
 	public void appendJobLog(AppendJobLogRequest request, StreamObserver<AppendJobLogResponse> observer) {
 		try {
-			if (!recorder.append(toRecord(request))) {
+			var principal = JobLogAuthentication.RUNNER_ID.get();
+			if (principal == null) {
+				observer.onError(Status.UNAUTHENTICATED.withDescription("Runner certificate required").asRuntimeException());
+				return;
+			}
+			var record = toRecord(request);
+			if (!principal.equals(record.reportedBy().runnerId())) {
+				observer.onError(Status.PERMISSION_DENIED.withDescription("Runner certificate identity mismatch").asRuntimeException());
+				return;
+			}
+			if (!recorder.append(record)) {
 				observer.onError(Status.NOT_FOUND.withDescription("Job is unknown").asRuntimeException());
 				return;
 			}
 			observer.onNext(AppendJobLogResponse.getDefaultInstance());
 			observer.onCompleted();
+		} catch (JobLogCapacityException exception) {
+			observer.onError(Status.RESOURCE_EXHAUSTED.withDescription("Active Job log retention is full").asRuntimeException());
 		} catch (IllegalArgumentException exception) {
 			observer.onError(Status.INVALID_ARGUMENT.withDescription("Invalid job log record").asRuntimeException());
 		} catch (IllegalStateException exception) {
@@ -51,8 +60,8 @@ class GrpcJobLogService extends JobLogServiceGrpc.JobLogServiceImplBase {
 		}
 		var stream = switch (request.getStream()) {
 			case JOB_LOG_STREAM_UNSPECIFIED -> JobLogRecord.Stream.NONE;
-			case JOB_LOG_STDOUT -> JobLogRecord.Stream.STDOUT;
-			case JOB_LOG_STDERR -> JobLogRecord.Stream.STDERR;
+			case JOB_LOG_STREAM_STDOUT -> JobLogRecord.Stream.STDOUT;
+			case JOB_LOG_STREAM_STDERR -> JobLogRecord.Stream.STDERR;
 			case UNRECOGNIZED -> throw new IllegalArgumentException("unknown output stream");
 		};
 		return new JobLogRecord(new JobId(UUID.fromString(request.getJobId())),

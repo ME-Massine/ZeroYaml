@@ -60,6 +60,23 @@ func run() error {
 		return fmt.Errorf("failed to create runner identity: %w", err)
 	}
 
+	logReporter, err := joblogs.NewReporter(cfg.JobLogs, identity, cfg.StatusReportTimeout, logger)
+	if err != nil {
+		return fmt.Errorf("invalid job log configuration: %w", err)
+	}
+	var logSink joblogs.Sink
+	if logReporter != nil {
+		logSink = logReporter
+		// Registered before dispatcher.Close so executions drain first.
+		defer func() {
+			if err := logReporter.Close(); err != nil {
+				logger.Warn("job log connection close failed")
+			}
+		}()
+	} else {
+		logger.Info("job log delivery disabled; configure ZEROYAML_JOB_LOGS_ADDRESS and TLS files to enable")
+	}
+
 	// SIGINT covers local development and SIGTERM covers container and service
 	// managers. The signal handler is installed before the listener is opened so
 	// that a signal arriving during startup still triggers an ordered shutdown.
@@ -101,7 +118,7 @@ func run() error {
 	// container cleanup and status reporting.
 	dispatcher := jobexecution.NewDispatcher(
 		ctx,
-		sandbox.New(dockerBinary, logger, joblogs.NewReporter(cfg.ControlPlaneAddress, identity, cfg.StatusReportTimeout, logger)),
+		sandbox.New(dockerBinary, logger, logSink),
 		jobstatus.NewReporter(cfg.ControlPlaneAddress, identity, cfg.StatusReportTimeout, logger),
 		sandbox.Settings{
 			Image:           cfg.JobImage,

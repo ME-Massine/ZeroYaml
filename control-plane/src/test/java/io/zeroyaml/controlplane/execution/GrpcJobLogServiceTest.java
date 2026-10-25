@@ -14,6 +14,13 @@ import java.util.List;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import io.grpc.ManagedChannel;
+import io.grpc.Context;
+import io.grpc.Contexts;
+import io.grpc.ServerInterceptors;
+import io.grpc.ServerInterceptor;
+import io.grpc.ServerCall;
+import io.grpc.ServerCallHandler;
+import io.grpc.Metadata;
 import io.grpc.Server;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
@@ -48,7 +55,13 @@ class GrpcJobLogServiceTest {
 		job = runningJob();
 		var name = InProcessServerBuilder.generateName();
 		server = InProcessServerBuilder.forName(name).directExecutor()
-				.addService(new GrpcJobLogService(new JobLogRecorder(jobs, logs))).build().start();
+				.addService(ServerInterceptors.intercept(new GrpcJobLogService(new JobLogRecorder(jobs, logs)), new ServerInterceptor() {
+					@Override
+					public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+						// Transport authentication is exercised separately over real mTLS.
+						return Contexts.interceptCall(Context.current().withValue(JobLogAuthentication.RUNNER_ID, RUNNER.runnerId()), call, headers, next);
+					}
+				})).build().start();
 		channel = InProcessChannelBuilder.forName(name).directExecutor().build();
 		client = JobLogServiceGrpc.newBlockingStub(channel);
 	}
@@ -60,10 +73,27 @@ class GrpcJobLogServiceTest {
 	}
 
 	@Test
+	void refusesCallsWithoutAuthenticatedTransportContext() throws IOException {
+		var name = InProcessServerBuilder.generateName();
+		var unprotected = InProcessServerBuilder.forName(name).directExecutor()
+				.addService(new GrpcJobLogService(new JobLogRecorder(jobs, logs))).build().start();
+		var connection = InProcessChannelBuilder.forName(name).directExecutor().build();
+		try {
+			var error = assertThrows(StatusRuntimeException.class,
+					() -> JobLogServiceGrpc.newBlockingStub(connection).appendJobLog(request(job, 1).build()));
+			assertEquals(Status.Code.UNAUTHENTICATED, error.getStatus().getCode());
+			assertTrue(logs.snapshot(job.id()).isEmpty());
+		} finally {
+			connection.shutdownNow();
+			unprotected.shutdownNow();
+		}
+	}
+
+	@Test
 	void recordsBothStreamsAndRawBytesWithoutChangingJobState() {
 		byte[] raw = { 'a', (byte) 0xff, '\n' };
 		client.appendJobLog(request(job, 1).setContent(ByteString.copyFrom(raw)).build());
-		client.appendJobLog(request(job, 2).setStream(JobLogStream.JOB_LOG_STDERR).build());
+		client.appendJobLog(request(job, 2).setStream(JobLogStream.JOB_LOG_STREAM_STDERR).build());
 		client.appendJobLog(end(job, 3).build());
 		var records = logs.snapshot(job.id());
 		assertEquals(3, records.size());
@@ -80,7 +110,7 @@ class GrpcJobLogServiceTest {
 	@Test
 	void permitsLogsForFailedJobsAndExplicitlyIncompleteFinalGaps() {
 		job.fail(new io.zeroyaml.controlplane.domain.job.JobFailure("NON_ZERO_EXIT", "command failed"), CREATED.plusSeconds(3));
-		client.appendJobLog(request(job, 1).setStream(JobLogStream.JOB_LOG_STDERR).build());
+		client.appendJobLog(request(job, 1).setStream(JobLogStream.JOB_LOG_STREAM_STDERR).build());
 		client.appendJobLog(end(job, 3).setIncomplete(true).setTruncated(true).build());
 		assertEquals(JobStatus.FAILED, job.status());
 		assertTrue(logs.snapshot(job.id()).getLast().incomplete());
@@ -90,7 +120,7 @@ class GrpcJobLogServiceTest {
 	@Test
 	void refusesUnknownUnassignedAndWrongRunnerLogs() {
 		assertStatus(Status.Code.NOT_FOUND, request(job, 1).setJobId(JobId.newId().value().toString()).build());
-		assertStatus(Status.Code.FAILED_PRECONDITION, request(job, 1).setRunnerId("other").build());
+		assertStatus(Status.Code.PERMISSION_DENIED, request(job, 1).setRunnerId("other").build());
 		assertStatus(Status.Code.FAILED_PRECONDITION, request(job, 1).setInstanceId("other").build());
 		var queued = newJob();
 		assertStatus(Status.Code.FAILED_PRECONDITION, request(queued, 1).build());
@@ -99,7 +129,6 @@ class GrpcJobLogServiceTest {
 
 	@Test
 	void refusesOutOfOrderDuplicateAndPostFinalChunks() {
-		assertStatus(Status.Code.FAILED_PRECONDITION, request(job, 2).build());
 		client.appendJobLog(request(job, 1).build());
 		assertStatus(Status.Code.FAILED_PRECONDITION, request(job, 1).build());
 		assertStatus(Status.Code.FAILED_PRECONDITION, end(job, 3).build());
@@ -125,7 +154,6 @@ class GrpcJobLogServiceTest {
 				request(job, 1).setObservedAt(Timestamp.newBuilder().setSeconds(253402300800L)).build(),
 				request(job, 1).setObservedAt(Timestamp.newBuilder().setNanos(-1)).build(),
 				request(job, 1).setObservedAt(Timestamp.newBuilder().setNanos(1000000000)).build(),
-				request(job, 1).setObservedAt(Timestamp.newBuilder().setSeconds(CREATED.getEpochSecond() - 1)).build(),
 				request(job, 1).clearStream().build(),
 				request(job, 1).setStreamValue(99).build(),
 				request(job, 1).clearContent().build(),
@@ -133,7 +161,7 @@ class GrpcJobLogServiceTest {
 				request(job, 1).setTruncated(true).build(),
 				request(job, 1).setIncomplete(true).build(),
 				request(job, 1).setEndOfOutput(true).build(),
-				end(job, 1).setStream(JobLogStream.JOB_LOG_STDERR).build()
+				end(job, 1).setStream(JobLogStream.JOB_LOG_STREAM_STDERR).build()
 		);
 		for (var value : invalid) { assertStatus(Status.Code.INVALID_ARGUMENT, value); }
 		assertTrue(logs.snapshot(job.id()).isEmpty());
@@ -153,16 +181,51 @@ class GrpcJobLogServiceTest {
 	}
 
 	@Test
-	void evictsTheOldestJobAsAUnitWhenRetentionIsFull() {
+	void preservesActiveJobsAndRejectsNewLogsAtCapacity() {
 		client.appendJobLog(request(job, 1).build());
-		for (int count = 0; count < 32; count++) {
+		for (int count = 1; count < 32; count++) {
 			client.appendJobLog(request(runningJob(), 1).build());
 		}
-		assertTrue(logs.snapshot(job.id()).isEmpty());
-		assertStatus(Status.Code.FAILED_PRECONDITION, request(job, 2).build());
-		// A sender whose prefix was evicted can still report an incomplete tail.
-		client.appendJobLog(end(job, 3).setIncomplete(true).build());
+		var overflow = runningJob();
+		assertStatus(Status.Code.RESOURCE_EXHAUSTED, request(overflow, 1).build());
+		assertStatus(Status.Code.RESOURCE_EXHAUSTED, end(overflow, 2).setIncomplete(true).build());
 		assertEquals(1, logs.snapshot(job.id()).size());
+		client.appendJobLog(request(job, 2).build());
+		client.appendJobLog(end(job, 3).build());
+		client.appendJobLog(request(overflow, 2).build());
+		assertTrue(logs.snapshot(job.id()).isEmpty());
+		assertEquals(2, logs.snapshot(overflow.id()).getFirst().sequence());
+	}
+
+	@Test
+	void evictsOldestFinishedOutputWhilePreservingOlderActiveOutput() {
+		client.appendJobLog(request(job, 1).build());
+		var completed = runningJob();
+		client.appendJobLog(end(completed, 1).build());
+		for (int count = 2; count < 33; count++) {
+			client.appendJobLog(request(runningJob(), 1).build());
+		}
+		assertFalse(logs.snapshot(job.id()).isEmpty());
+		assertTrue(logs.snapshot(completed.id()).isEmpty());
+		client.appendJobLog(end(job, 2).build());
+	}
+
+	@Test
+	void acceptsClockSkewAndClockChangesWithoutLosingSequenceOrder() {
+		client.appendJobLog(request(job, 1).setObservedAt(Timestamp.newBuilder().setSeconds(CREATED.minusSeconds(3600).getEpochSecond())).build());
+		client.appendJobLog(request(job, 2).setObservedAt(Timestamp.newBuilder().setSeconds(CREATED.minusSeconds(7200).getEpochSecond())).build());
+		client.appendJobLog(end(job, 3).setObservedAt(Timestamp.newBuilder().setSeconds(CREATED.minusSeconds(7200).getEpochSecond())).build());
+		assertEquals(List.of(1L, 2L, 3L), logs.snapshot(job.id()).stream().map(JobLogRecord::sequence).toList());
+	}
+
+	@Test
+	void acceptsLaterChunksAfterDeliveryLossAndRequiresIncompleteFinalMarker() {
+		client.appendJobLog(request(job, 2).build());
+		client.appendJobLog(request(job, 4).build());
+		assertStatus(Status.Code.FAILED_PRECONDITION, request(job, 3).build());
+		assertStatus(Status.Code.FAILED_PRECONDITION, end(job, 5).build());
+		client.appendJobLog(end(job, 5).setIncomplete(true).setTruncated(true).build());
+		assertEquals(List.of(2L, 4L, 5L), logs.snapshot(job.id()).stream().map(JobLogRecord::sequence).toList());
 	}
 
 	@Test
@@ -202,7 +265,7 @@ class GrpcJobLogServiceTest {
 		return AppendJobLogRequest.newBuilder().setProtocolVersion("runner.v1")
 				.setJobId(target.id().value().toString()).setRunnerId(RUNNER.runnerId()).setInstanceId(RUNNER.instanceId())
 				.setSequence(sequence).setObservedAt(Timestamp.newBuilder().setSeconds(CREATED.plusSeconds(2).getEpochSecond()))
-				.setStream(JobLogStream.JOB_LOG_STDOUT).setContent(ByteString.copyFromUtf8("output"));
+				.setStream(JobLogStream.JOB_LOG_STREAM_STDOUT).setContent(ByteString.copyFromUtf8("output"));
 	}
 
 	private AppendJobLogRequest.Builder end(Job target, long sequence) {

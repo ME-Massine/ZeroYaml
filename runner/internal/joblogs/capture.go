@@ -44,26 +44,30 @@ type Sink interface {
 
 // Capture serializes stdout and stderr observations with bounded memory and
 // no background queue. Slow delivery applies backpressure to the Docker CLI.
-// A failed delivery suppresses further data calls; Close still attempts a final
-// incomplete marker. Cross-pipe ordering reflects observation, not write time.
+// Failed chunks are not retried; later observations can still be delivered.
+// Cross-pipe ordering reflects observation, not write time.
 type Capture struct {
-	mu             sync.Mutex
-	ctx            context.Context
-	sink           Sink
-	jobID          string
-	now            func() time.Time
-	sequence       uint64
-	bytes          int
-	chunks         int
-	truncated      bool
-	incomplete     bool
-	deliveryFailed bool
-	closed         bool
+	mu         sync.Mutex
+	delivery   chan struct{}
+	cancel     context.CancelFunc
+	ctx        context.Context
+	sink       Sink
+	jobID      string
+	now        func() time.Time
+	sequence   uint64
+	bytes      int
+	chunks     int
+	truncated  bool
+	incomplete bool
+	closed     bool
 }
 
 // NewCapture creates the bounded capture for one dispatched Job.
 func NewCapture(ctx context.Context, jobID string, sink Sink) *Capture {
-	return &Capture{ctx: ctx, jobID: jobID, sink: sink, now: time.Now}
+	deliveryCtx, cancel := context.WithCancel(ctx)
+	capture := &Capture{ctx: deliveryCtx, cancel: cancel, jobID: jobID, sink: sink, now: time.Now, delivery: make(chan struct{}, 1)}
+	capture.delivery <- struct{}{}
+	return capture
 }
 
 // Writer returns a pipe writer safe to use concurrently with the other stream.
@@ -79,12 +83,27 @@ type streamWriter struct {
 
 func (w streamWriter) Write(p []byte) (int, error) {
 	c := w.capture
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	n := len(p)
-	for len(p) > 0 && !c.closed && !c.deliveryFailed {
+	// Serialize delivery without holding the state lock over network I/O.
+	select {
+	case <-c.delivery:
+		defer func() { c.delivery <- struct{}{} }()
+	case <-c.ctx.Done():
+		c.mu.Lock()
+		c.incomplete = true
+		c.truncated = c.truncated || n > 0
+		c.mu.Unlock()
+		return n, nil
+	}
+	for len(p) > 0 {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			break
+		}
 		if c.chunks == MaxChunks || c.bytes == MaxOutputBytes {
 			c.truncated = true
+			c.mu.Unlock()
 			break
 		}
 		size := min(len(p), MaxChunkBytes, MaxOutputBytes-c.bytes)
@@ -92,9 +111,12 @@ func (w streamWriter) Write(p []byte) (int, error) {
 		record := Record{JobID: c.jobID, Sequence: c.sequence, ObservedAt: c.now().UTC(), Stream: w.stream, Content: append([]byte(nil), p[:size]...)}
 		c.bytes += size
 		c.chunks++
+		c.mu.Unlock()
 		if c.sink != nil && c.sink.Append(c.ctx, record) != nil {
-			c.deliveryFailed = true
+			c.mu.Lock()
 			c.incomplete = true
+			c.truncated = true
+			c.mu.Unlock()
 		}
 		p = p[size:]
 	}
@@ -115,14 +137,27 @@ func (c *Capture) MarkIncomplete() {
 // A returned error means the final marker was not acknowledged.
 func (c *Capture) Close(ctx context.Context, interrupted bool) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		c.mu.Unlock()
 		return nil
 	}
 	c.closed = true
+	// Cancel in-flight delivery before waiting for ordering. State changes do
+	// not wait for a network deadline; ctx bounds the delivery drain.
+	c.cancel()
+	c.mu.Unlock()
+	select {
+	case <-c.delivery:
+		defer func() { c.delivery <- struct{}{} }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	c.mu.Lock()
 	c.sequence++
+	record := Record{JobID: c.jobID, Sequence: c.sequence, ObservedAt: c.now().UTC(), EndOfOutput: true, Truncated: c.truncated, Incomplete: c.incomplete || interrupted}
+	c.mu.Unlock()
 	if c.sink != nil {
-		return c.sink.Append(ctx, Record{JobID: c.jobID, Sequence: c.sequence, ObservedAt: c.now().UTC(), EndOfOutput: true, Truncated: c.truncated, Incomplete: c.incomplete || interrupted})
+		return c.sink.Append(ctx, record)
 	}
 	return nil
 }

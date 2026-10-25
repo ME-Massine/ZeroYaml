@@ -23,9 +23,8 @@ class JobLogRecorder {
 			if (job.runnerAssignment().isEmpty() || !job.runnerAssignment().get().equals(record.reportedBy())) {
 				throw new IllegalStateException("log must come from the assigned Runner process");
 			}
-			if (record.observedAt().isBefore(job.createdAt())) {
-				throw new IllegalArgumentException("observation precedes Job creation");
-			}
+			// Runner and Control Plane clocks are independent. Sequence orders
+			// observations without comparing timestamps from different hosts.
 			logs.append(record);
 			return true;
 		}).orElse(false);
