@@ -22,7 +22,22 @@ public interface JobStore {
 	 * @param job Job to record
 	 * @throws IllegalStateException when a Job with the same identity is already recorded
 	 */
-	void add(Job job);
+	default void add(Job job) {
+		if (recordIfAbsent(job) != job) {
+			throw new IllegalStateException("Job " + job.id().value() + " is already recorded");
+		}
+	}
+
+	/**
+	 * Records a Job unless a Job with the same identity is already recorded. The
+	 * check and the insert are one atomic step, so concurrent callers recording
+	 * the same identity record it exactly once.
+	 *
+	 * @param job Job to record
+	 * @return the recorded Job: {@code job} itself when it was recorded by this call, otherwise
+	 *         the Job already recorded under its identity, which is left unchanged
+	 */
+	Job recordIfAbsent(Job job);
 
 	/**
 	 * Looks up a Job for reading.
