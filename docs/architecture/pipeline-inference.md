@@ -52,4 +52,5 @@ Maven in the Job image.
 ## Out of scope
 
 Other ecosystems (separate issues), content-based detection, nested modules,
-fetching the file listing, creating Jobs (#23), and persistence (#28).
+fetching the file listing, creating Jobs (#23, see
+[`pipeline-job-creation.md`](./pipeline-job-creation.md)), and persistence (#28).

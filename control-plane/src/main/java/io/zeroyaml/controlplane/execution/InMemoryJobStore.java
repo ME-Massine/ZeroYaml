@@ -27,13 +27,11 @@ class InMemoryJobStore implements JobStore {
 	private final ConcurrentHashMap<JobId, Job> jobsById = new ConcurrentHashMap<>();
 
 	@Override
-	public void add(Job job) {
+	public Job recordIfAbsent(Job job) {
 		Objects.requireNonNull(job, "job must not be null");
 
 		var existing = jobsById.putIfAbsent(job.id(), job);
-		if (existing != null) {
-			throw new IllegalStateException("Job " + job.id().value() + " is already recorded");
-		}
+		return existing == null ? job : existing;
 	}
 
 	@Override

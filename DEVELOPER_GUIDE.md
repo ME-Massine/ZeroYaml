@@ -477,6 +477,7 @@ Start with the [Phase 1 architecture and operating contract](./docs/architecture
 then use the focused [Runner identity and registration contract](./docs/architecture/runner-identity.md),
 [Core Job Model](./docs/architecture/job-model.md),
 [Minimal pipeline model](./docs/architecture/pipeline-model.md),
+[Pipeline Job creation](./docs/architecture/pipeline-job-creation.md),
 [RunJob dispatch contract](./docs/architecture/run-job-contract.md), and
 [Job status reporting contract](./docs/architecture/job-status-contract.md)
 references for the implemented foundation and its explicit integration limits. The

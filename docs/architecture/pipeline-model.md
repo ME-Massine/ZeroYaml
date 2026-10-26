@@ -88,6 +88,8 @@ lifecycle work.
 
 ## Out of scope
 
-Repository inspection and inference rules (#22), creating and dispatching Jobs
-from a pipeline and correlating each Job to a step (#23), persistence (#28),
-Docker-specific details, and compatibility with any workflow YAML format.
+Repository inspection and inference rules (#22), creating Jobs from a pipeline
+and correlating each Job to a step (#23, see
+[`pipeline-job-creation.md`](./pipeline-job-creation.md)), dispatching them
+(#30), persistence (#28), Docker-specific details, and compatibility with any
+workflow YAML format.
