@@ -14,12 +14,16 @@ import (
 type logSink struct {
 	records  []joblogs.Record
 	onAppend func(joblogs.Record)
+	failData bool
 }
 
 func (s *logSink) Append(_ context.Context, r joblogs.Record) error {
 	s.records = append(s.records, r)
 	if s.onAppend != nil {
 		s.onAppend(r)
+	}
+	if s.failData && !r.EndOfOutput {
+		return context.DeadlineExceeded
 	}
 	return nil
 }
@@ -71,6 +75,62 @@ func TestRunOutputFailureKeepsCommandOutcomeAndMarksIncomplete(t *testing.T) {
 		t.Fatalf("result = %+v, marker = %+v", result, sink.records)
 	}
 	docker.assertCleanedUp(t, "checkout-id", "job-id")
+}
+
+func TestRunStalledLogDeliveryDoesNotConsumeJobDeadline(t *testing.T) {
+	docker := newFakeDocker()
+	sink := &logSink{failData: true}
+	s := newTestSandbox(docker)
+	s.logs = sink
+	s.stream = func(_ context.Context, stdout, stderr io.Writer, _ ...string) error {
+		_, err := stdout.Write(make([]byte, joblogs.MaxOutputBytes))
+		return err
+	}
+	result := s.Run(context.Background(), testSpec())
+	if result.Outcome != OutcomeSucceeded || result.ExitCode == nil || *result.ExitCode != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(sink.records) != 3 || !sink.records[2].EndOfOutput || !sink.records[2].Incomplete || !sink.records[2].Truncated {
+		t.Fatalf("stalled delivery records = %+v", sink.records)
+	}
+	docker.assertCleanedUp(t, "checkout-id", "job-id")
+}
+
+func TestCommandExitWinsWhenLogDeliveryReachesExecutionDeadline(t *testing.T) {
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	docker := newFakeDocker()
+	sink := &logSink{}
+	s := newTestSandbox(docker)
+	waitFinished := make(chan struct{})
+	originalDocker := s.docker
+	s.docker = func(ctx context.Context, args ...string) (string, error) {
+		output, err := originalDocker(ctx, args...)
+		if args[0] == "wait" {
+			close(waitFinished)
+		}
+		return output, err
+	}
+	s.stream = func(ctx context.Context, stdout, stderr io.Writer, _ ...string) error {
+		<-waitFinished
+		cancel()
+		return ctx.Err()
+	}
+	capture := joblogs.NewCapture(runCtx, "job", sink)
+	id := newResourceNames(testExecutionID)
+	code, err := s.runContainer(context.Background(), runCtx, testExecutionID, id.job, jobCreateArgs(testSpec(), id), capture)
+	if err != nil || code != 0 {
+		t.Fatalf("command exit = %d, %v", code, err)
+	}
+	if err := capture.Close(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.records) != 1 || !sink.records[0].EndOfOutput || !sink.records[0].Incomplete {
+		t.Fatalf("final marker = %+v", sink.records)
+	}
+	if !slices.Contains(docker.commandSummary(), "rm job-id") {
+		t.Fatal("job container was not removed")
+	}
 }
 
 func TestRunCancellationDuringCaptureCleansResourcesAndMarksIncomplete(t *testing.T) {

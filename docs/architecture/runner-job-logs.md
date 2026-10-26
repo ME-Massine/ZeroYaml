@@ -7,8 +7,10 @@ credentials. No host environment variables are added to Job containers.
 
 ## Capture and delivery
 
-The sandbox creates a non-TTY Job container, starts it, follows `docker logs
---follow`, reads the exit code with `docker wait`, and removes the container.
+The sandbox creates a non-TTY Job container, starts it, runs `docker wait`
+alongside `docker logs --follow`, and removes the container after both finish.
+An exit observed before the execution deadline remains the command outcome
+even if log following is interrupted by that deadline.
 Following reads retained output even when the command exited before the CLI
 attached. Docker demultiplexes stdout and stderr into separate CLI pipes.
 
@@ -29,7 +31,11 @@ concurrency-safe connection for all Jobs and closes it after execution drain.
 Each call has a deadline from
 `ZEROYAML_RUNNER_STATUS_REPORT_TIMEOUT` and respects the execution deadline.
 Slow calls apply bounded backpressure without a background queue. No retries
-are configured. A failed chunk is not retried, but later chunks are still sent.
+are configured. A failed chunk is not retried. Later chunks are still sent after
+one failure; after a second data delivery failure for the same Job, the Runner
+drains remaining output without further data RPCs so a stalled ingress cannot
+consume the execution deadline through repeated timeouts. The final marker is
+still attempted.
 The final marker sets both `incomplete` and `truncated` when a data delivery was
 not acknowledged; that chunk may have been retained if only its response was
 lost. Sequence gaps describe missing observations without poisoning later calls.

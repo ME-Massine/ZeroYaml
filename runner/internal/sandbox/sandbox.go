@@ -216,6 +216,17 @@ func (s *Sandbox) runContainer(
 	if _, err := s.docker(runCtx, "start", containerID); err != nil {
 		return 0, err
 	}
+	// Observe the command exit independently of log delivery, which can still
+	// be stalled when a successful command reaches its execution deadline.
+	type waitResult struct {
+		output string
+		err    error
+	}
+	wait := make(chan waitResult, 1)
+	go func() {
+		output, err := s.docker(runCtx, "wait", containerID)
+		wait <- waitResult{output, err}
+	}()
 	if capture != nil && s.stream != nil {
 		// Following after start also reads output from a command that already
 		// exited. Checkout output is excluded because it can contain credentials.
@@ -225,7 +236,8 @@ func (s *Sandbox) runContainer(
 		}
 	}
 
-	output, err = s.docker(runCtx, "wait", containerID)
+	result := <-wait
+	output, err = result.output, result.err
 	if err != nil {
 		return 0, err
 	}

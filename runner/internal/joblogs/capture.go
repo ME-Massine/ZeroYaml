@@ -44,22 +44,24 @@ type Sink interface {
 
 // Capture serializes stdout and stderr observations with bounded memory and
 // no background queue. Slow delivery applies backpressure to the Docker CLI.
-// Failed chunks are not retried; later observations can still be delivered.
+// Failed chunks are not retried; delivery stops after two failures so a stalled
+// ingress cannot consume the Job deadline one chunk at a time.
 // Cross-pipe ordering reflects observation, not write time.
 type Capture struct {
-	mu         sync.Mutex
-	delivery   chan struct{}
-	cancel     context.CancelFunc
-	ctx        context.Context
-	sink       Sink
-	jobID      string
-	now        func() time.Time
-	sequence   uint64
-	bytes      int
-	chunks     int
-	truncated  bool
-	incomplete bool
-	closed     bool
+	mu               sync.Mutex
+	delivery         chan struct{}
+	cancel           context.CancelFunc
+	ctx              context.Context
+	sink             Sink
+	jobID            string
+	now              func() time.Time
+	sequence         uint64
+	bytes            int
+	chunks           int
+	deliveryFailures int
+	truncated        bool
+	incomplete       bool
+	closed           bool
 }
 
 // NewCapture creates the bounded capture for one dispatched Job.
@@ -101,6 +103,10 @@ func (w streamWriter) Write(p []byte) (int, error) {
 			c.mu.Unlock()
 			break
 		}
+		if c.deliveryFailures >= 2 {
+			c.mu.Unlock()
+			break
+		}
 		if c.chunks == MaxChunks || c.bytes == MaxOutputBytes {
 			c.truncated = true
 			c.mu.Unlock()
@@ -114,6 +120,7 @@ func (w streamWriter) Write(p []byte) (int, error) {
 		c.mu.Unlock()
 		if c.sink != nil && c.sink.Append(c.ctx, record) != nil {
 			c.mu.Lock()
+			c.deliveryFailures++
 			c.incomplete = true
 			c.truncated = true
 			c.mu.Unlock()
