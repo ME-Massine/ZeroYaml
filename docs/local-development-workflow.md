@@ -46,7 +46,7 @@ broken environment.
 | A healthy Runner is selected and the Job is dispatched | Not wired — [#24](https://github.com/MohamedMBG/ZeroYaml/issues/24) | [Section 9](#9-expected-states) |
 | A dispatched Job runs in Docker and reports running and terminal status | Wired | [Section 8](#8-observe-one-job-execution) |
 | Job logs are streamed and captured | Not wired — [#26](https://github.com/MohamedMBG/ZeroYaml/issues/26) | [Section 9](#9-expected-states) |
-| Job state survives a Control Plane restart | Not wired — [#28](https://github.com/MohamedMBG/ZeroYaml/issues/28) | [Section 9](#9-expected-states) |
+| Recorded Job state survives a Control Plane restart | Wired by the local [#28](https://github.com/MohamedMBG/ZeroYaml/issues/28) change; the manual dispatch in Section 8 bypasses this store | [Section 9](#9-expected-states) |
 | Lifecycle events are published | Not wired — [#29](https://github.com/MohamedMBG/ZeroYaml/issues/29) | [Section 3](#3-prerequisites) |
 | One push produces one executed pipeline | Not wired — [#30](https://github.com/MohamedMBG/ZeroYaml/issues/30) | [Section 9](#9-expected-states) |
 | An automated test covers the whole chain | Not wired — [#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) | [Section 11](#11-automated-coverage) |
@@ -625,11 +625,11 @@ the Control Plane `registration` tests ([Section 11](#11-automated-coverage)).
 
 | Check | Command | Expected |
 | --- | --- | --- |
-| Schema applied | `docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml -c "\dt"` | `repository_connection` and Flyway's `flyway_schema_history` |
-| Migration recorded | `... -c "SELECT version, description, success FROM flyway_schema_history;"` | `1`, `success = t` |
+| Schema applied | `docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml -c "\dt"` | `repository_connection`, `pipeline_run`, `job`, and Flyway's `flyway_schema_history` |
+| Migration recorded | `... -c "SELECT version, description, success FROM flyway_schema_history;"` | `1` and `2`, each with `success = t` |
 | Connection row | `... -c "SELECT provider, owner, name, status FROM repository_connection;"` | The row from [Section 6](#6-connect-a-repository) |
 | Connection survives a restart | `docker compose -f ./infra/compose.yaml down`, then `up -d postgres`, then repeat the row check | The row is still present, because `down` without `-v` removes the container and keeps the `postgres-data` volume. Not executed yet; run once by hand and record the result |
-| Job state survives a restart | — | Not expected. Jobs are held in a process-local store and are lost on restart until [#28](https://github.com/MohamedMBG/ZeroYaml/issues/28) |
+| Recorded Job state survives a restart | `... -c "SELECT id, status, started_at, completed_at FROM job;"` before and after restarting the Control Plane | Rows are retained in PostgreSQL. Section 8 does not create one because it dispatches directly to the Runner; the PostgreSQL integration test for #28 verifies the state round trip |
 
 The restart check recreates PostgreSQL, not the Control Plane, because the row
 lives in the database and a Control Plane restart cannot lose it. Database

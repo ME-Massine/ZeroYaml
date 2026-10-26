@@ -77,7 +77,7 @@ public class PipelineJobCreationService {
 		var recorded = new ArrayList<PipelineJobReference>(planned.size());
 		var createdCount = 0;
 		for (var pipelineJob : planned) {
-			var job = jobs.recordIfAbsent(pipelineJob.job());
+			var job = jobs.recordIfAbsent(pipelineJob);
 			if (job == pipelineJob.job()) {
 				createdCount++;
 			}

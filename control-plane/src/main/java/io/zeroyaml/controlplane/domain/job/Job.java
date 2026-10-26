@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 
 /**
@@ -29,10 +30,12 @@ public final class Job {
 	private final Instant createdAt;
 
 	private JobStatus status;
+	private Instant queuedAt;
 	private Instant startedAt;
 	private Instant completedAt;
 	private RunnerAssignment runnerAssignment;
 	private JobFailure failure;
+	private Integer exitCode;
 
 	private Job(JobId id, RepositoryReference repository, ExecutionDefinition execution, Instant createdAt) {
 		this.id = Objects.requireNonNull(id, "id must not be null");
@@ -86,6 +89,11 @@ public final class Job {
 		return Optional.ofNullable(startedAt);
 	}
 
+	/** Returns when the Job entered the queue, if it has. */
+	public Optional<Instant> queuedAt() {
+		return Optional.ofNullable(queuedAt);
+	}
+
 	public Optional<Instant> completedAt() {
 		return Optional.ofNullable(completedAt);
 	}
@@ -98,11 +106,17 @@ public final class Job {
 		return Optional.ofNullable(failure);
 	}
 
+	/** Returns the command exit code when execution produced one. */
+	public OptionalInt exit() {
+		return exitCode == null ? OptionalInt.empty() : OptionalInt.of(exitCode);
+	}
+
 	/**
 	 * Moves a newly created Job into the scheduler queue.
 	 */
 	public void queue(Instant queuedAt) {
 		transitionTo(JobStatus.QUEUED, queuedAt);
+		this.queuedAt = queuedAt;
 	}
 
 	/**
@@ -119,7 +133,13 @@ public final class Job {
 	 * Completes a running Job successfully.
 	 */
 	public void succeed(Instant completedAt) {
+		succeed(completedAt, null);
+	}
+
+	/** Completes a running Job and retains the command exit code, when reported. */
+	public void succeed(Instant completedAt, Integer exitCode) {
 		transitionTo(JobStatus.SUCCEEDED, completedAt);
+		this.exitCode = exitCode;
 		this.completedAt = completedAt;
 	}
 
@@ -130,6 +150,7 @@ public final class Job {
 		Objects.requireNonNull(failure, "failure must not be null");
 		transitionTo(JobStatus.FAILED, completedAt);
 		this.failure = failure;
+		this.exitCode = failure.exitCode();
 		this.completedAt = completedAt;
 	}
 

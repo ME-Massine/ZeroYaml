@@ -153,7 +153,7 @@ public class JobExecutionStatusRecorder {
 		}
 
 		if (report.state() == JobExecutionState.SUCCEEDED) {
-			job.succeed(report.completedAt());
+			job.succeed(report.completedAt(), report.exitCode());
 		} else {
 			job.fail(toJobFailure(report), report.completedAt());
 		}
