@@ -11,6 +11,8 @@ import org.springframework.stereotype.Service;
 
 import io.zeroyaml.controlplane.domain.pipeline.Pipeline;
 import io.zeroyaml.controlplane.domain.pipeline.PipelineJobTranslator;
+import io.zeroyaml.controlplane.events.JobLifecycleEvent;
+import io.zeroyaml.controlplane.events.JobLifecycleEventPublisher;
 
 /**
  * Creates and records the executable Jobs for an inferred pipeline.
@@ -36,6 +38,10 @@ import io.zeroyaml.controlplane.domain.pipeline.PipelineJobTranslator;
  * recorded next to the earlier plan's Jobs, which stay untouched and are not
  * part of the result. Deciding whether the earlier plan's Jobs must be stopped
  * or superseded belongs to the Phase 3 pipeline lifecycle.</p>
+ *
+ * <p>Each Job this call records publishes one {@code job.accepted} event after
+ * {@link JobStore#recordIfAbsent} has committed it. A Job that was already
+ * recorded publishes nothing, so a repeated delivery repeats no event.</p>
  */
 @Service
 public class PipelineJobCreationService {
@@ -43,12 +49,13 @@ public class PipelineJobCreationService {
 	private static final Logger log = LoggerFactory.getLogger(PipelineJobCreationService.class);
 
 	private final JobStore jobs;
+	private final JobLifecycleEventPublisher events;
 	private final Clock clock;
 	private final PipelineJobTranslator translator = new PipelineJobTranslator();
 
 	@Autowired
-	PipelineJobCreationService(JobStore jobs) {
-		this(jobs, Clock.systemUTC());
+	PipelineJobCreationService(JobStore jobs, JobLifecycleEventPublisher events) {
+		this(jobs, events, Clock.systemUTC());
 	}
 
 	/**
@@ -56,8 +63,9 @@ public class PipelineJobCreationService {
 	 * registration package already exposes a {@link Clock} bean, so a second one
 	 * is not registered here; that would make injection by type ambiguous.
 	 */
-	PipelineJobCreationService(JobStore jobs, Clock clock) {
+	PipelineJobCreationService(JobStore jobs, JobLifecycleEventPublisher events, Clock clock) {
 		this.jobs = Objects.requireNonNull(jobs, "jobs must not be null");
+		this.events = Objects.requireNonNull(events, "events must not be null");
 		this.clock = Objects.requireNonNull(clock, "clock must not be null");
 	}
 
@@ -77,9 +85,10 @@ public class PipelineJobCreationService {
 		var recorded = new ArrayList<PipelineJobReference>(planned.size());
 		var createdCount = 0;
 		for (var pipelineJob : planned) {
-			var job = jobs.recordIfAbsent(pipelineJob.job());
+			var job = jobs.recordIfAbsent(pipelineJob);
 			if (job == pipelineJob.job()) {
 				createdCount++;
+				events.publish(JobLifecycleEvent.accepted(pipelineJob));
 			}
 			recorded.add(new PipelineJobReference(
 					pipelineJob.pipelineId(), pipelineJob.position(), pipelineJob.stepName(), job.id()));

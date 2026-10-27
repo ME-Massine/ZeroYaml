@@ -5,8 +5,8 @@ import java.util.Objects;
 import org.springframework.stereotype.Component;
 
 /**
- * Attributes output to an existing assigned Job under the same per-Job lock as
- * status reports. Recording output never mutates the authoritative Job state.
+ * Attributes output through a read-only Job lookup. Assignment is immutable
+ * once execution starts, so output never needs the status-report write lock.
  */
 @Component
 class JobLogRecorder {
@@ -19,9 +19,9 @@ class JobLogRecorder {
 	}
 
 	boolean append(JobLogRecord record) {
-		return jobs.update(record.jobId(), job -> {
+		return jobs.find(record.jobId()).map(job -> {
 			if (job.runnerAssignment().isEmpty() || !job.runnerAssignment().get().equals(record.reportedBy())) {
-				throw new IllegalStateException("log must come from the assigned Runner process");
+				throw new JobLogAttributionException();
 			}
 			// Runner and Control Plane clocks are independent. Sequence orders
 			// observations without comparing timestamps from different hosts.

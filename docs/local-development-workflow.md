@@ -46,7 +46,7 @@ broken environment.
 | A healthy Runner is selected and the Job is dispatched | Not wired — [#24](https://github.com/MohamedMBG/ZeroYaml/issues/24) | [Section 9](#9-expected-states) |
 | A dispatched Job runs in Docker and reports running and terminal status | Wired | [Section 8](#8-observe-one-job-execution) |
 | Job logs are streamed and captured | Not wired — [#26](https://github.com/MohamedMBG/ZeroYaml/issues/26) | [Section 9](#9-expected-states) |
-| Job state survives a Control Plane restart | Not wired — [#28](https://github.com/MohamedMBG/ZeroYaml/issues/28) | [Section 9](#9-expected-states) |
+| Recorded Job state survives a Control Plane restart | Wired by the local [#28](https://github.com/MohamedMBG/ZeroYaml/issues/28) change; the manual dispatch in Section 8 bypasses this store | [Section 9](#9-expected-states) |
 | Lifecycle events are published | Not wired — [#29](https://github.com/MohamedMBG/ZeroYaml/issues/29) | [Section 3](#3-prerequisites) |
 | One push produces one executed pipeline | Not wired — [#30](https://github.com/MohamedMBG/ZeroYaml/issues/30) | [Section 9](#9-expected-states) |
 | An automated test covers the whole chain | Not wired — [#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) | [Section 11](#11-automated-coverage) |
@@ -91,10 +91,10 @@ docker --version
 docker compose version
 ```
 
-`infra/compose.yaml` also defines Redis and Kafka. Neither has a consumer yet —
-the Control Plane declares no Redis or Kafka dependency — so this workflow
-starts PostgreSQL only. Lifecycle event publishing is tracked as
-[#29](https://github.com/MohamedMBG/ZeroYaml/issues/29).
+`infra/compose.yaml` also defines Redis and Kafka. This workflow starts
+PostgreSQL only. Redis has no consumer. Kafka is needed only for the optional
+Job lifecycle event stream, which is off by default; see
+[Job lifecycle events](#job-lifecycle-events).
 
 ## 4. Startup order
 
@@ -625,11 +625,11 @@ the Control Plane `registration` tests ([Section 11](#11-automated-coverage)).
 
 | Check | Command | Expected |
 | --- | --- | --- |
-| Schema applied | `docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml -c "\dt"` | `repository_connection` and Flyway's `flyway_schema_history` |
-| Migration recorded | `... -c "SELECT version, description, success FROM flyway_schema_history;"` | `1`, `success = t` |
+| Schema applied | `docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml -c "\dt"` | `repository_connection`, `pipeline_run`, `job`, and Flyway's `flyway_schema_history` |
+| Migration recorded | `... -c "SELECT version, description, success FROM flyway_schema_history;"` | `1` and `2`, each with `success = t` |
 | Connection row | `... -c "SELECT provider, owner, name, status FROM repository_connection;"` | The row from [Section 6](#6-connect-a-repository) |
 | Connection survives a restart | `docker compose -f ./infra/compose.yaml down`, then `up -d postgres`, then repeat the row check | The row is still present, because `down` without `-v` removes the container and keeps the `postgres-data` volume. Not executed yet; run once by hand and record the result |
-| Job state survives a restart | — | Not expected. Jobs are held in a process-local store and are lost on restart until [#28](https://github.com/MohamedMBG/ZeroYaml/issues/28) |
+| Recorded Job state survives a restart | `... -c "SELECT id, status, started_at, completed_at FROM job;"` before and after restarting the Control Plane | Rows are retained in PostgreSQL. Section 8 does not create one because it dispatches directly to the Runner; the PostgreSQL integration test for #28 verifies the state round trip |
 
 The restart check recreates PostgreSQL, not the Control Plane, because the row
 lives in the database and a Control Plane restart cannot lose it. Database
@@ -642,6 +642,64 @@ and must be restarted to register again.
 Captured Job logs have no persistence check yet; log streaming is
 [#26](https://github.com/MohamedMBG/ZeroYaml/issues/26). Until then, command
 output is visible only in the Job container's own output.
+
+### Job lifecycle events
+
+The Control Plane can publish `job.accepted`, `job.started`, `job.succeeded`,
+and `job.failed` to the Kafka topic `zeroyaml.job-lifecycle.v1` after each
+transition is committed. Publication is off by default, and nothing in this
+workflow needs it. The envelope, key, and failure behavior are documented in
+[`job-lifecycle-events.md`](./architecture/job-lifecycle-events.md).
+
+The producer can be verified now against a real broker, using the same
+`apache/kafka:4.0.0` image as `infra/compose.yaml`, which Testcontainers
+starts:
+
+```powershell
+Push-Location control-plane
+.\mvnw.cmd --batch-mode test "-Dtest=KafkaJobLifecycleEventPublisherIntegrationTest"
+Pop-Location
+```
+
+To watch the stream from a running Control Plane, start the broker, enable
+publication in the Control Plane shell from [Section 4.2](#42-control-plane)
+before starting it, and attach the console consumer included in the image:
+
+```powershell
+docker compose -f .\infra\compose.yaml up -d kafka
+$env:ZEROYAML_JOB_EVENTS_ENABLED = 'true'
+# $env:ZEROYAML_KAFKA_BOOTSTRAP_SERVERS defaults to localhost:9092.
+
+docker exec -it zeroyaml-kafka /opt/kafka/bin/kafka-console-consumer.sh `
+  --bootstrap-server localhost:9092 --topic zeroyaml.job-lifecycle.v1 `
+  --from-beginning --property print.key=true
+```
+
+```bash
+docker compose -f ./infra/compose.yaml up -d kafka
+export ZEROYAML_JOB_EVENTS_ENABLED=true
+
+docker exec -it zeroyaml-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic zeroyaml.job-lifecycle.v1 \
+  --from-beginning --property print.key=true
+```
+
+The Control Plane logs `Publishing job lifecycle events to topic
+zeroyaml.job-lifecycle.v1` at startup. The topic is created on the first
+event, so until then the consumer may warn that the topic is unknown. Each
+line printed is the Job identity followed by one JSON envelope.
+
+An event is published only for a Job that the Control Plane records.
+[Section 8](#8-observe-one-job-execution) dispatches a Job by hand and records
+none, so it produces no event. The stream receives events from a running
+Control Plane only once a push creates Jobs
+([#30](https://github.com/MohamedMBG/ZeroYaml/issues/30)). Until then, the
+integration test above is the executable check.
+
+With publication enabled and Kafka stopped, the Control Plane still starts,
+acknowledges webhooks, and records reports. It logs
+`Failed to publish <type> event ...` once the producer gives up, which can
+take up to 30 s.
 
 ## 10. Troubleshooting
 
@@ -735,6 +793,7 @@ What the suites already cover, per step of this document:
 | `RunJob` validation, acceptance, and rejection | Runner `grpcserver` tests, including over the transport |
 | Container execution, cleanup, and result mapping | Runner `sandbox` tests; `TestDockerExecution*` for real containers |
 | Status reporting and reconciliation | Runner `jobstatus` tests; Control Plane `execution` tests |
+| Lifecycle event payloads, publish-after-commit, and producer failure handling | Control Plane `events` tests, including a Testcontainers Kafka broker; `JdbcJobStoreTest` for commit visibility |
 | A push through to an execution | Not covered — [#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) |
 
 No automated test spans a push to an execution yet. The two halves in Sections

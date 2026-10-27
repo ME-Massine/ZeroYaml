@@ -5,6 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 
 import java.io.IOException;
 import java.net.URI;
@@ -43,8 +48,8 @@ import org.junit.jupiter.api.Test;
 class GrpcJobLogServiceTest {
 	private static final Instant CREATED = Instant.parse("2026-01-01T00:00:00Z");
 	private static final RunnerAssignment RUNNER = new RunnerAssignment("runner-1", "instance-1");
-	private final JobStore jobs = new InMemoryJobStore();
-	private final JobLogStore logs = new InMemoryJobLogStore();
+	private final JobStore jobs = spy(new InMemoryJobStore());
+	private final JobLogStore logs = spy(new InMemoryJobLogStore());
 	private ManagedChannel channel;
 	private Server server;
 	private JobLogServiceGrpc.JobLogServiceBlockingStub client;
@@ -87,6 +92,32 @@ class GrpcJobLogServiceTest {
 			connection.shutdownNow();
 			unprotected.shutdownNow();
 		}
+	}
+
+	@Test
+	void attributionUsesReadOnlyLookupWithoutUpdatingTheJob() {
+		client.appendJobLog(request(job, 1).build());
+		verify(jobs).find(job.id());
+		verify(jobs, never()).update(any(), any());
+	}
+
+	@Test
+	void storageFailuresAreInternalErrorsWithoutStorageDetails() {
+		for (var failure : List.of(new IllegalStateException("private storage detail"),
+				new org.springframework.dao.DataAccessResourceFailureException("private database detail"))) {
+			doThrow(failure).when(logs).append(any());
+			var error = assertThrows(StatusRuntimeException.class, () -> client.appendJobLog(request(job, 1).build()));
+			assertEquals(Status.Code.INTERNAL, error.getStatus().getCode());
+			assertEquals("Job log storage failed", error.getStatus().getDescription());
+		}
+		assertTrue(logs.snapshot(job.id()).isEmpty());
+	}
+
+	@Test
+	void jobLookupStateFailuresAreInternalErrors() {
+		doThrow(new IllegalStateException("private lookup detail")).when(jobs).find(job.id());
+		assertStatus(Status.Code.INTERNAL, request(job, 1).build());
+		assertTrue(logs.snapshot(job.id()).isEmpty());
 	}
 
 	@Test

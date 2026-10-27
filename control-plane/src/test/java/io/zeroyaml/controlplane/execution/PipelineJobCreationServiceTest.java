@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -23,13 +24,17 @@ import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 
 import io.zeroyaml.controlplane.domain.job.ExecutionDefinition;
+import io.zeroyaml.controlplane.domain.job.Job;
 import io.zeroyaml.controlplane.domain.job.JobId;
 import io.zeroyaml.controlplane.domain.job.JobStatus;
 import io.zeroyaml.controlplane.domain.job.RepositoryReference;
 import io.zeroyaml.controlplane.domain.pipeline.Pipeline;
 import io.zeroyaml.controlplane.domain.pipeline.PipelineId;
+import io.zeroyaml.controlplane.domain.pipeline.PipelineJob;
 import io.zeroyaml.controlplane.domain.pipeline.PipelineJobTranslator;
 import io.zeroyaml.controlplane.domain.pipeline.PipelineStep;
+import io.zeroyaml.controlplane.events.JobLifecycleEvent;
+import io.zeroyaml.controlplane.events.JobLifecycleEventType;
 
 /**
  * Covers recording the Jobs of a pipeline, including repeated input that must
@@ -43,8 +48,9 @@ class PipelineJobCreationServiceTest {
 	private static final PipelineId PIPELINE_ID = new PipelineId(UUID.fromString("7d3c5a1e-0000-4000-8000-000000000001"));
 
 	private final JobStore jobs = new InMemoryJobStore();
+	private final List<JobLifecycleEvent> published = new CopyOnWriteArrayList<>();
 	private final PipelineJobCreationService service =
-			new PipelineJobCreationService(jobs, Clock.fixed(NOW, ZoneOffset.UTC));
+			new PipelineJobCreationService(jobs, published::add, Clock.fixed(NOW, ZoneOffset.UTC));
 
 	@Test
 	void recordsOneJobPerStepOfAMultiStepPipeline() {
@@ -167,9 +173,64 @@ class PipelineJobCreationServiceTest {
 				totalCreated += future.get(10, TimeUnit.SECONDS).createdCount();
 			}
 			assertEquals(2, totalCreated);
+			// Only the call that recorded a Job announces it.
+			assertEquals(2, published.size());
+			assertEquals(2, published.stream().map(JobLifecycleEvent::jobId).distinct().count());
 		} finally {
 			executor.shutdownNow();
 		}
+	}
+
+	@Test
+	void publishesAnAcceptedEventForEveryRecordedJobWithItsPipelineStep() {
+		var pipeline = pipeline(step("build", "make"), step("test", "make", "test"));
+
+		var creation = service.createJobs(pipeline);
+
+		assertEquals(2, published.size());
+		for (var i = 0; i < 2; i++) {
+			var event = published.get(i);
+			var reference = creation.jobs().get(i);
+			assertEquals(JobLifecycleEventType.ACCEPTED, event.type());
+			assertEquals(reference.jobId(), event.jobId());
+			assertEquals(PIPELINE_ID.value(), event.pipelineId());
+			assertEquals(reference.stepName(), event.stepName());
+			assertEquals(reference.position(), event.stepPosition());
+			assertEquals(NOW, event.occurredAt());
+			assertEquals(SOURCE.revision(), event.revision());
+		}
+	}
+
+	@Test
+	void publishesNoAcceptedEventForJobsThatWereAlreadyRecorded() {
+		var pipeline = pipeline(step("build", "make"), step("test", "make", "test"));
+		jobs.add(new PipelineJobTranslator().translate(pipeline, NOW).get(0).job());
+
+		service.createJobs(pipeline);
+		service.createJobs(pipeline);
+
+		assertEquals(List.of(jobIdOf(pipeline, "test")), published.stream().map(JobLifecycleEvent::jobId).toList());
+	}
+
+	@Test
+	void publishesNoAcceptedEventForAJobThatFailedToRecord() {
+		var pipeline = pipeline(step("build", "make"), step("test", "make", "test"));
+		var testId = jobIdOf(pipeline, "test");
+		var failingStore = new InMemoryJobStore() {
+			@Override
+			public Job recordIfAbsent(PipelineJob pipelineJob) {
+				if (pipelineJob.job().id().equals(testId)) {
+					throw new IllegalStateException("database unavailable");
+				}
+				return super.recordIfAbsent(pipelineJob);
+			}
+		};
+		var failing = new PipelineJobCreationService(failingStore, published::add, Clock.fixed(NOW, ZoneOffset.UTC));
+
+		assertThrows(IllegalStateException.class, () -> failing.createJobs(pipeline));
+
+		// The Job committed before the failure is announced; the one that was not recorded is not.
+		assertEquals(List.of(jobIdOf(pipeline, "build")), published.stream().map(JobLifecycleEvent::jobId).toList());
 	}
 
 	@Test

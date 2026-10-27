@@ -1,5 +1,7 @@
 package io.zeroyaml.controlplane.execution;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 import org.slf4j.Logger;
@@ -10,6 +12,8 @@ import io.zeroyaml.controlplane.domain.job.Job;
 import io.zeroyaml.controlplane.domain.job.JobFailure;
 import io.zeroyaml.controlplane.domain.job.JobStatus;
 import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
+import io.zeroyaml.controlplane.events.JobLifecycleEvent;
+import io.zeroyaml.controlplane.events.JobLifecycleEventPublisher;
 
 /**
  * Applies Runner execution reports to the Jobs the Control Plane owns.
@@ -32,6 +36,11 @@ import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
  *
  * <p>Reconciliation runs with exclusive access to the Job through
  * {@link JobStore#update}, so concurrent reports for one Job are serialized.</p>
+ *
+ * <p>An applied report publishes one lifecycle event per transition, and only
+ * after {@link JobStore#update} has returned, when the transition is
+ * committed. A report that is not applied publishes nothing, so a repeated
+ * report never repeats an event.</p>
  */
 @Component
 public class JobExecutionStatusRecorder {
@@ -39,9 +48,11 @@ public class JobExecutionStatusRecorder {
 	private static final Logger log = LoggerFactory.getLogger(JobExecutionStatusRecorder.class);
 
 	private final JobStore jobs;
+	private final JobLifecycleEventPublisher events;
 
-	JobExecutionStatusRecorder(JobStore jobs) {
+	JobExecutionStatusRecorder(JobStore jobs, JobLifecycleEventPublisher events) {
 		this.jobs = Objects.requireNonNull(jobs, "jobs must not be null");
+		this.events = Objects.requireNonNull(events, "events must not be null");
 	}
 
 	/**
@@ -53,13 +64,35 @@ public class JobExecutionStatusRecorder {
 	public JobStatusReportOutcome record(JobStatusReport report) {
 		Objects.requireNonNull(report, "report must not be null");
 
-		var outcome = jobs.update(report.jobId(), job -> reconcile(job, report))
-				.orElseGet(() -> JobStatusReportOutcome.unknownJob(
-						"Job " + report.jobId().value() + " is not known to this control plane"));
+		var reconciliation = jobs.update(report.jobId(), job -> {
+			var before = job.status();
+			var outcome = reconcile(job, report);
+			// The events are built while the Job is still exclusively held, so they
+			// describe exactly this transition and not one applied concurrently.
+			return new Reconciliation(outcome, outcome.isApplied() ? transitionEvents(before, job) : List.of());
+		}).orElseGet(() -> new Reconciliation(
+				JobStatusReportOutcome.unknownJob("Job " + report.jobId().value() + " is not known to this control plane"),
+				List.of()));
 
-		logOutcome(report, outcome);
+		logOutcome(report, reconciliation.outcome());
+		reconciliation.events().forEach(events::publish);
 
-		return outcome;
+		return reconciliation.outcome();
+	}
+
+	/**
+	 * Lists the events for an applied report. A terminal report for a queued
+	 * Job applies two transitions, so it yields a start and an outcome event.
+	 */
+	private static List<JobLifecycleEvent> transitionEvents(JobStatus before, Job job) {
+		var transitions = new ArrayList<JobLifecycleEvent>(2);
+		if (before == JobStatus.QUEUED) {
+			transitions.add(JobLifecycleEvent.started(job));
+		}
+		if (job.status().isTerminal()) {
+			transitions.add(JobLifecycleEvent.completed(job));
+		}
+		return transitions;
 	}
 
 	private JobStatusReportOutcome reconcile(Job job, JobStatusReport report) {
@@ -153,7 +186,7 @@ public class JobExecutionStatusRecorder {
 		}
 
 		if (report.state() == JobExecutionState.SUCCEEDED) {
-			job.succeed(report.completedAt());
+			job.succeed(report.completedAt(), report.exitCode());
 		} else {
 			job.fail(toJobFailure(report), report.completedAt());
 		}
@@ -192,4 +225,6 @@ public class JobExecutionStatusRecorder {
 					outcome.message());
 		}
 	}
+
+	private record Reconciliation(JobStatusReportOutcome outcome, List<JobLifecycleEvent> events) { }
 }

@@ -79,22 +79,31 @@ Runner identity field), protobuf timestamp validity, the
 existing Job's assigned Runner process, and strictly increasing sequences. The running
 status report normally establishes that assignment before output starts. If
 that report was lost and no assignment exists, logs are refused; a later
-terminal status report may still recover Job state. Unknown Jobs return
+terminal status report may still recover Job state. Attribution uses a read-only
+`JobStore.find`: the assignment never changes once set, so receiving chunks does
+not lock or update the PostgreSQL Job row. Unknown Jobs return
 `NOT_FOUND`; malformed records return `INVALID_ARGUMENT`; wrong assignment,
 sequence conflicts, and post-final records return `FAILED_PRECONDITION`.
+Unexpected storage failures return `INTERNAL`, without exposing storage details.
 Data chunks may skip missing sequence numbers after a delivery failure; a final
 marker following any gap must be incomplete. Duplicate and decreasing sequences
 are refused rather than retained twice. Receiving logs for a terminal Job is valid,
 because status and output are separate observations.
 
 `JobLogStore` is the application-facing retention boundary. The in-memory
-implementation keeps at most 32 Jobs, each bounded to 1 MiB and 257 records,
-and evicts only the oldest admitted Job with a retained final marker. Active
-output is never evicted. If all 32 slots lack final markers, a new Job's chunks
+implementation keeps at most 32 Jobs, each bounded to 1 MiB and 257 records.
+At capacity it evicts the oldest admitted Job whose output has a final marker
+or has received no records for at least five minutes. The idle interval uses
+Control Plane receipt time, independent of Runner timestamps. Successful
+appends refresh it; snapshots and rejected records do not. Recent active output
+is preserved. If all 32 slots have recent unfinished output, a new Job's chunks
 and final marker return `RESOURCE_EXHAUSTED` without changing existing output.
 Once a slot is available, later chunks from that sender can be admitted with
-their original sequences and an incomplete end. A sender that disappears without
-a final marker keeps its slot until restart; no background expiry is implemented.
+their original sequences and an incomplete end. Missing final markers therefore
+cannot occupy capacity indefinitely. Eviction happens only when admitting a new
+Job at capacity, with no background sweep. A running Job silent for five minutes
+can also lose its earlier output; late records may form a new retained fragment,
+and the missing initial sequences signal that earlier observations are absent.
 `snapshot(JobId)` returns immutable ordered records with defensive byte copies;
 an empty list means unknown or evicted output. Restart loses every record. Durable storage, REST exposure,
 search, and a browser viewer are outside this change.
@@ -156,10 +165,11 @@ context, concurrent writes, empty output, large output, tiny-write limits,
 failed execution, cancellation, capture errors, gRPC deadlines, and payload
 exclusion from operational logs. Control Plane transport tests cover byte
 fidelity, assignment validation, sequence rules, timestamp and payload bounds,
-the 1 MiB limit, completed-output eviction, active-retention saturation,
+the 1 MiB limit, completed-output and idle-stream eviction, active-retention saturation,
 immutable snapshots, and failed Jobs. Regression tests also cover independent
 host clocks, sequence gaps after loss, cancellation of blocked delivery,
-connection reuse, TLS trust, and forged certificate/request identities. Test
+connection reuse, TLS trust, forged certificate/request identities, read-only
+PostgreSQL attribution during a locked lifecycle update, and storage failures. Test
 certificates and keys are generated in temporary storage; none are checked in.
 
 The isolated real-Docker test needs the Docker CLI, a running daemon, and

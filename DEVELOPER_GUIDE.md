@@ -478,6 +478,8 @@ then use the focused [Runner identity and registration contract](./docs/architec
 [Core Job Model](./docs/architecture/job-model.md),
 [Minimal pipeline model](./docs/architecture/pipeline-model.md),
 [Pipeline Job creation](./docs/architecture/pipeline-job-creation.md),
+[Job and pipeline run persistence](./docs/architecture/job-persistence.md),
+[Job lifecycle events](./docs/architecture/job-lifecycle-events.md),
 [RunJob dispatch contract](./docs/architecture/run-job-contract.md), and
 [Job status reporting contract](./docs/architecture/job-status-contract.md)
 references for the implemented foundation and its explicit integration limits. The
@@ -733,6 +735,23 @@ hanging them.
 The table layout, the duplicate rule, and the locking behavior are documented
 in
 [`docs/architecture/repository-connection-model.md`](./docs/architecture/repository-connection-model.md#persistence).
+
+### Job lifecycle events
+
+The Control Plane can publish committed Job transitions (`job.accepted`,
+`job.started`, `job.succeeded`, `job.failed`) to Kafka. Publication is off by
+default, so Kafka is never required to start the service, acknowledge a
+webhook, or record a status report.
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `ZEROYAML_JOB_EVENTS_ENABLED` | `false` | Publish lifecycle events to Kafka |
+| `ZEROYAML_KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka brokers; the default matches the `kafka` service in `infra/compose.yaml` |
+
+The envelope, key, ordering, and failure behavior are documented in
+[`docs/architecture/job-lifecycle-events.md`](./docs/architecture/job-lifecycle-events.md).
+The integration tests start Kafka through Testcontainers, so `mvnw verify`
+needs a running Docker daemon, which PostgreSQL tests already require.
 
 ### Runner development
 

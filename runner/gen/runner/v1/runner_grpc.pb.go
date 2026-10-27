@@ -516,8 +516,9 @@ const (
 //
 // JobLogService is implemented by the Control Plane. Each call acknowledges
 // one bounded chunk; it never changes Job state. Delivery is best effort with
-// no retries. Existing peers remain compatible; older Control Planes answer
-// UNIMPLEMENTED and execution continues without log delivery.
+// no retries. Existing peers remain compatible; older Control Planes have no
+// dedicated log listener, so delivery fails with UNAVAILABLE while execution
+// status remains usable.
 type JobLogServiceClient interface {
 	AppendJobLog(ctx context.Context, in *AppendJobLogRequest, opts ...grpc.CallOption) (*AppendJobLogResponse, error)
 }
@@ -546,8 +547,9 @@ func (c *jobLogServiceClient) AppendJobLog(ctx context.Context, in *AppendJobLog
 //
 // JobLogService is implemented by the Control Plane. Each call acknowledges
 // one bounded chunk; it never changes Job state. Delivery is best effort with
-// no retries. Existing peers remain compatible; older Control Planes answer
-// UNIMPLEMENTED and execution continues without log delivery.
+// no retries. Existing peers remain compatible; older Control Planes have no
+// dedicated log listener, so delivery fails with UNAVAILABLE while execution
+// status remains usable.
 type JobLogServiceServer interface {
 	AppendJobLog(context.Context, *AppendJobLogRequest) (*AppendJobLogResponse, error)
 	mustEmbedUnimplementedJobLogServiceServer()

@@ -41,8 +41,10 @@ class GrpcJobLogService extends JobLogServiceGrpc.JobLogServiceImplBase {
 			observer.onError(Status.RESOURCE_EXHAUSTED.withDescription("Active Job log retention is full").asRuntimeException());
 		} catch (IllegalArgumentException exception) {
 			observer.onError(Status.INVALID_ARGUMENT.withDescription("Invalid job log record").asRuntimeException());
-		} catch (IllegalStateException exception) {
+		} catch (JobLogAttributionException | JobLogSequenceException exception) {
 			observer.onError(Status.FAILED_PRECONDITION.withDescription("Job log attribution or sequence conflict").asRuntimeException());
+		} catch (RuntimeException exception) {
+			observer.onError(Status.INTERNAL.withDescription("Job log storage failed").withCause(exception).asRuntimeException());
 		}
 	}
 

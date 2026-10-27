@@ -1,18 +1,21 @@
 package io.zeroyaml.controlplane.execution;
 
+import java.net.URI;
+import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
 
 import io.zeroyaml.controlplane.domain.job.Job;
 import io.zeroyaml.controlplane.domain.job.JobId;
+import io.zeroyaml.controlplane.domain.job.RepositoryReference;
+import io.zeroyaml.controlplane.domain.pipeline.PipelineId;
+import io.zeroyaml.controlplane.domain.pipeline.PipelineJob;
 
 /**
  * The Control Plane's record of the Jobs it owns.
  *
  * <p>The interface exists so that Job state stays reachable through one
- * boundary while the storage technology is chosen separately. Durable
- * persistence is tracked as its own work; the current implementation keeps
- * Jobs in memory.</p>
+ * boundary while the storage technology is chosen separately.</p>
  */
 public interface JobStore {
 
@@ -38,6 +41,18 @@ public interface JobStore {
 	 *         the Job already recorded under its identity, which is left unchanged
 	 */
 	Job recordIfAbsent(Job job);
+
+	/** Records a Job and its link to the pipeline step that created it. */
+	Job recordIfAbsent(PipelineJob pipelineJob);
+
+	/** Returns Jobs in step order for one pipeline identity and repository revision. */
+	List<PipelineJobReference> findByPipeline(PipelineId pipelineId, RepositoryReference source);
+
+	/** Returns pipeline Jobs for a repository, ordered by creation time and step. */
+	List<PipelineJobReference> findByRepository(URI location);
+
+	/** Returns pipeline Jobs for one immutable repository revision. */
+	List<PipelineJobReference> findBySource(RepositoryReference source);
 
 	/**
 	 * Looks up a Job for reading.

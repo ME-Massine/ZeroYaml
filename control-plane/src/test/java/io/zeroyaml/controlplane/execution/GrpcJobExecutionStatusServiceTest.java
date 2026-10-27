@@ -280,7 +280,7 @@ class GrpcJobExecutionStatusServiceTest {
 		var serverName = InProcessServerBuilder.generateName();
 		server = InProcessServerBuilder.forName(serverName)
 				.directExecutor()
-				.addService(new GrpcJobExecutionStatusService(new JobExecutionStatusRecorder(jobs)))
+				.addService(new GrpcJobExecutionStatusService(new JobExecutionStatusRecorder(jobs, event -> { })))
 				.build()
 				.start();
 		channel = InProcessChannelBuilder.forName(serverName).directExecutor().build();

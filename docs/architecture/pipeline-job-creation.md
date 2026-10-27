@@ -72,24 +72,20 @@ reached.
 
 Each call writes one info log line with the pipeline identity and the created
 and total counts. The repository location and revision are not logged: the
-location can embed credentials, and the pipeline identity is enough to
+the model can receive a location with credentials, and the pipeline identity is enough to
 correlate the Jobs with the push that produced them.
 
 ## Limits
 
-- Jobs are held by the in-memory `JobStore` and lost on restart until durable
-  persistence lands (#28). Idempotency therefore holds per Control Plane
-  process; a redelivery after a restart creates the Jobs again.
-- Memory grows with every distinct plan: at most 50 Jobs per pipeline, never
-  evicted before restart. No other store grows with pipelines.
+- The PostgreSQL `JobStore` added by #28 retains Jobs across Control Plane
+  restarts. Redelivery finds the previously recorded identities and states.
 - A changed plan for a revision runs next to the earlier plan's Jobs. Whether
   those must be stopped or superseded, and which plan wins, needs an explicit
   re-run decision that belongs to the Phase 3 pipeline lifecycle.
 - A failure part-way through the steps leaves the Jobs recorded so far. A retry
   with the same plan records the rest; it does not roll back.
-- The link from a Job back to its step is returned to the caller and can be
-  recomputed from the plan and the identities, but it is not stored as such.
-  Storing it is part of persistence (#28).
+- The link from a Job back to its step is returned to the caller and stored
+  with the Job in PostgreSQL. See [Job persistence](./job-persistence.md).
 - Nothing calls the service from the webhook path yet. Obtaining the repository
   file listing, calling inference, and handing the Jobs to selection and
   dispatch are #30.
