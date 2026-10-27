@@ -9,8 +9,10 @@ import java.net.URI;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -40,6 +42,7 @@ import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
 import io.zeroyaml.controlplane.domain.pipeline.Pipeline;
 import io.zeroyaml.controlplane.domain.pipeline.PipelineId;
 import io.zeroyaml.controlplane.domain.pipeline.PipelineStep;
+import io.zeroyaml.controlplane.events.JobLifecycleEventPublisher;
 import tools.jackson.databind.json.JsonMapper;
 
 /** Exercises committed records and row locking against the real migration. */
@@ -70,7 +73,7 @@ class JdbcJobStoreTest {
 	@Test
 	void recordsPipelineJobsAndFindsThemByPipelineRepositoryRevisionAndIdentity() {
 		var pipeline = pipeline(SOURCE);
-		var creation = new PipelineJobCreationService(store, Clock.fixed(NOW, ZoneOffset.UTC)).createJobs(pipeline);
+		var creation = new PipelineJobCreationService(store, event -> { }, Clock.fixed(NOW, ZoneOffset.UTC)).createJobs(pipeline);
 		var build = creation.jobs().get(0);
 		var test = creation.jobs().get(1);
 
@@ -82,7 +85,7 @@ class JdbcJobStoreTest {
 		assertEquals(List.of("mvn", "package"), store.find(build.jobId()).orElseThrow().execution().command());
 		assertEquals(1, jdbc.sql("SELECT count(*) FROM pipeline_run").query(Integer.class).single());
 
-		var retried = new PipelineJobCreationService(store, Clock.fixed(NOW.plusSeconds(1), ZoneOffset.UTC))
+		var retried = new PipelineJobCreationService(store, event -> { }, Clock.fixed(NOW.plusSeconds(1), ZoneOffset.UTC))
 				.createJobs(pipeline);
 		assertEquals(0, retried.createdCount());
 		assertEquals(2, jdbc.sql("SELECT count(*) FROM job").query(Integer.class).single());
@@ -91,14 +94,14 @@ class JdbcJobStoreTest {
 
 	@Test
 	void runningSuccessAndFailureSurviveANewStoreInstance() {
-		var creation = new PipelineJobCreationService(store, Clock.fixed(NOW, ZoneOffset.UTC))
+		var creation = new PipelineJobCreationService(store, event -> { }, Clock.fixed(NOW, ZoneOffset.UTC))
 				.createJobs(pipeline(SOURCE));
 		var success = creation.jobs().get(0).jobId();
 		var failure = creation.jobs().get(1).jobId();
 		for (var id : List.of(success, failure)) {
 			store.update(id, job -> { job.queue(NOW.plusSeconds(1)); return job.status(); });
 		}
-		var recorder = new JobExecutionStatusRecorder(store);
+		var recorder = new JobExecutionStatusRecorder(store, event -> { });
 		for (var id : List.of(success, failure)) {
 			assertEquals(JobStatusReportDecision.APPLIED,
 					recorder.record(JobStatusReport.running(id, RUNNER, NOW.plusSeconds(2))).decision());
@@ -127,7 +130,7 @@ class JdbcJobStoreTest {
 
 	@Test
 	void rejectsInvalidTransitionWithoutChangingCommittedState() {
-		var id = new PipelineJobCreationService(store, Clock.fixed(NOW, ZoneOffset.UTC))
+		var id = new PipelineJobCreationService(store, event -> { }, Clock.fixed(NOW, ZoneOffset.UTC))
 				.createJobs(pipeline(SOURCE)).jobs().get(0).jobId();
 		assertThrows(InvalidJobTransitionException.class,
 				() -> store.update(id, job -> { job.succeed(NOW.plusSeconds(1)); return job; }));
@@ -162,7 +165,7 @@ class JdbcJobStoreTest {
 		var translated = new io.zeroyaml.controlplane.domain.pipeline.PipelineJobTranslator().translate(pipeline, NOW);
 		var direct = translated.get(0).job();
 		assertSame(direct, store.recordIfAbsent(direct));
-		var creation = new PipelineJobCreationService(store, Clock.fixed(NOW, ZoneOffset.UTC)).createJobs(pipeline);
+		var creation = new PipelineJobCreationService(store, event -> { }, Clock.fixed(NOW, ZoneOffset.UTC)).createJobs(pipeline);
 		assertEquals(1, creation.createdCount());
 		assertEquals(creation.jobs(), freshStore().findByPipeline(PIPELINE_ID, SOURCE));
 	}
@@ -170,7 +173,7 @@ class JdbcJobStoreTest {
 	@Test
 	void reorderedPlanKeepsJobsAndUpdatesTheirStepOrder() {
 		var pipeline = pipeline(SOURCE);
-		var service = new PipelineJobCreationService(store, Clock.fixed(NOW, ZoneOffset.UTC));
+		var service = new PipelineJobCreationService(store, event -> { }, Clock.fixed(NOW, ZoneOffset.UTC));
 		var first = service.createJobs(pipeline);
 		var buildId = first.jobs().get(0).jobId();
 		store.update(buildId, job -> { job.queue(NOW.plusSeconds(1)); return job.status(); });
@@ -188,7 +191,7 @@ class JdbcJobStoreTest {
 
 	@Test
 	void pipelineLookupSeparatesSourcesSharingAnIdentity() {
-		var service = new PipelineJobCreationService(store, Clock.fixed(NOW, ZoneOffset.UTC));
+		var service = new PipelineJobCreationService(store, event -> { }, Clock.fixed(NOW, ZoneOffset.UTC));
 		var original = service.createJobs(pipeline(SOURCE));
 		var otherRepository = new RepositoryReference(URI.create("https://example.test/acme/other.git"), "abc123");
 		var otherRevision = new RepositoryReference(SOURCE.location(), "def456");
@@ -203,7 +206,7 @@ class JdbcJobStoreTest {
 
 	@Test
 	void concurrentTerminalReportsCommitOneOutcome() throws Exception {
-		var id = new PipelineJobCreationService(store, Clock.fixed(NOW, ZoneOffset.UTC))
+		var id = new PipelineJobCreationService(store, event -> { }, Clock.fixed(NOW, ZoneOffset.UTC))
 				.createJobs(pipeline(SOURCE)).jobs().get(0).jobId();
 		store.update(id, job -> { job.queue(NOW.plusSeconds(1)); return job.status(); });
 		var report = JobStatusReport.succeeded(id, RUNNER, NOW.plusSeconds(2), NOW.plusSeconds(3), 0);
@@ -212,11 +215,11 @@ class JdbcJobStoreTest {
 		try {
 			var first = executor.submit(() -> {
 				start.await(10, TimeUnit.SECONDS);
-				return new JobExecutionStatusRecorder(store).record(report).decision();
+				return new JobExecutionStatusRecorder(store, event -> { }).record(report).decision();
 			});
 			var second = executor.submit(() -> {
 				start.await(10, TimeUnit.SECONDS);
-				return new JobExecutionStatusRecorder(freshStore()).record(report).decision();
+				return new JobExecutionStatusRecorder(freshStore(), event -> { }).record(report).decision();
 			});
 			assertEquals(List.of(JobStatusReportDecision.APPLIED, JobStatusReportDecision.DUPLICATE),
 					List.of(first.get(30, TimeUnit.SECONDS), second.get(30, TimeUnit.SECONDS)).stream().sorted().toList());
@@ -224,6 +227,26 @@ class JdbcJobStoreTest {
 		} finally {
 			executor.shutdownNow();
 		}
+	}
+
+	@Test
+	void lifecycleEventsAreHandedOverOnlyAfterTheirTransitionIsCommitted() {
+		// Each event reads its Job on another thread, so through another connection
+		// that sees committed rows only. An event handed over inside the transaction
+		// would find no Job, or the state before the transition.
+		var observed = new ArrayList<String>();
+		JobLifecycleEventPublisher events = event -> observed.add(event.type() + ":" + CompletableFuture
+				.supplyAsync(() -> freshStore().find(event.jobId()).map(job -> job.status().name()).orElse("MISSING"))
+				.join());
+		var id = new PipelineJobCreationService(store, events, Clock.fixed(NOW, ZoneOffset.UTC))
+				.createJobs(pipeline(SOURCE)).jobs().get(0).jobId();
+		store.update(id, job -> { job.queue(NOW.plusSeconds(1)); return job.status(); });
+
+		var recorder = new JobExecutionStatusRecorder(store, events);
+		recorder.record(JobStatusReport.running(id, RUNNER, NOW.plusSeconds(2)));
+		recorder.record(JobStatusReport.succeeded(id, RUNNER, NOW.plusSeconds(2), NOW.plusSeconds(3), 0));
+
+		assertEquals(List.of("ACCEPTED:CREATED", "ACCEPTED:CREATED", "STARTED:RUNNING", "SUCCEEDED:SUCCEEDED"), observed);
 	}
 
 	private JdbcJobStore freshStore() {

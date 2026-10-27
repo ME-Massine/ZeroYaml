@@ -91,10 +91,10 @@ docker --version
 docker compose version
 ```
 
-`infra/compose.yaml` also defines Redis and Kafka. Neither has a consumer yet —
-the Control Plane declares no Redis or Kafka dependency — so this workflow
-starts PostgreSQL only. Lifecycle event publishing is tracked as
-[#29](https://github.com/MohamedMBG/ZeroYaml/issues/29).
+`infra/compose.yaml` also defines Redis and Kafka. This workflow starts
+PostgreSQL only. Redis has no consumer. Kafka is needed only for the optional
+Job lifecycle event stream, which is off by default; see
+[Job lifecycle events](#job-lifecycle-events).
 
 ## 4. Startup order
 
@@ -643,6 +643,64 @@ Captured Job logs have no persistence check yet; log streaming is
 [#26](https://github.com/MohamedMBG/ZeroYaml/issues/26). Until then, command
 output is visible only in the Job container's own output.
 
+### Job lifecycle events
+
+The Control Plane can publish `job.accepted`, `job.started`, `job.succeeded`,
+and `job.failed` to the Kafka topic `zeroyaml.job-lifecycle.v1` after each
+transition is committed. Publication is off by default, and nothing in this
+workflow needs it. The envelope, key, and failure behavior are documented in
+[`job-lifecycle-events.md`](./architecture/job-lifecycle-events.md).
+
+The producer can be verified now against a real broker, using the same
+`apache/kafka:4.0.0` image as `infra/compose.yaml`, which Testcontainers
+starts:
+
+```powershell
+Push-Location control-plane
+.\mvnw.cmd --batch-mode test "-Dtest=KafkaJobLifecycleEventPublisherIntegrationTest"
+Pop-Location
+```
+
+To watch the stream from a running Control Plane, start the broker, enable
+publication in the Control Plane shell from [Section 4.2](#42-control-plane)
+before starting it, and attach the console consumer included in the image:
+
+```powershell
+docker compose -f .\infra\compose.yaml up -d kafka
+$env:ZEROYAML_JOB_EVENTS_ENABLED = 'true'
+# $env:ZEROYAML_KAFKA_BOOTSTRAP_SERVERS defaults to localhost:9092.
+
+docker exec -it zeroyaml-kafka /opt/kafka/bin/kafka-console-consumer.sh `
+  --bootstrap-server localhost:9092 --topic zeroyaml.job-lifecycle.v1 `
+  --from-beginning --property print.key=true
+```
+
+```bash
+docker compose -f ./infra/compose.yaml up -d kafka
+export ZEROYAML_JOB_EVENTS_ENABLED=true
+
+docker exec -it zeroyaml-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic zeroyaml.job-lifecycle.v1 \
+  --from-beginning --property print.key=true
+```
+
+The Control Plane logs `Publishing job lifecycle events to topic
+zeroyaml.job-lifecycle.v1` at startup. The topic is created on the first
+event, so until then the consumer may warn that the topic is unknown. Each
+line printed is the Job identity followed by one JSON envelope.
+
+An event is published only for a Job that the Control Plane records.
+[Section 8](#8-observe-one-job-execution) dispatches a Job by hand and records
+none, so it produces no event. The stream receives events from a running
+Control Plane only once a push creates Jobs
+([#30](https://github.com/MohamedMBG/ZeroYaml/issues/30)). Until then, the
+integration test above is the executable check.
+
+With publication enabled and Kafka stopped, the Control Plane still starts,
+acknowledges webhooks, and records reports. It logs
+`Failed to publish <type> event ...` once the producer gives up, which can
+take up to 30 s.
+
 ## 10. Troubleshooting
 
 ### GitHub webhook
@@ -735,6 +793,7 @@ What the suites already cover, per step of this document:
 | `RunJob` validation, acceptance, and rejection | Runner `grpcserver` tests, including over the transport |
 | Container execution, cleanup, and result mapping | Runner `sandbox` tests; `TestDockerExecution*` for real containers |
 | Status reporting and reconciliation | Runner `jobstatus` tests; Control Plane `execution` tests |
+| Lifecycle event payloads, publish-after-commit, and producer failure handling | Control Plane `events` tests, including a Testcontainers Kafka broker; `JdbcJobStoreTest` for commit visibility |
 | A push through to an execution | Not covered — [#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) |
 
 No automated test spans a push to an execution yet. The two halves in Sections

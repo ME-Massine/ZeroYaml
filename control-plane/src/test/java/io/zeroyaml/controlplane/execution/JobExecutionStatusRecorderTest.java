@@ -2,17 +2,22 @@ package io.zeroyaml.controlplane.execution;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URI;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 import io.zeroyaml.controlplane.domain.job.ExecutionDefinition;
 import io.zeroyaml.controlplane.domain.job.Job;
@@ -20,6 +25,8 @@ import io.zeroyaml.controlplane.domain.job.JobId;
 import io.zeroyaml.controlplane.domain.job.JobStatus;
 import io.zeroyaml.controlplane.domain.job.RepositoryReference;
 import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
+import io.zeroyaml.controlplane.events.JobLifecycleEvent;
+import io.zeroyaml.controlplane.events.JobLifecycleEventType;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -34,7 +41,8 @@ class JobExecutionStatusRecorderTest {
 	private static final RunnerAssignment RUNNER = new RunnerAssignment("runner-1", "instance-1");
 
 	private final JobStore jobs = new InMemoryJobStore();
-	private final JobExecutionStatusRecorder recorder = new JobExecutionStatusRecorder(jobs);
+	private final List<JobLifecycleEvent> published = new CopyOnWriteArrayList<>();
+	private final JobExecutionStatusRecorder recorder = new JobExecutionStatusRecorder(jobs, published::add);
 
 	@Test
 	void recordsThatAQueuedJobStartedRunningOnTheReportingRunner() {
@@ -281,6 +289,91 @@ class JobExecutionStatusRecorderTest {
 		var applied = outcomes.stream().filter(JobStatusReportOutcome::isApplied).count();
 		assertEquals(1, applied, "exactly one concurrent report may change the job");
 		assertEquals(JobStatus.SUCCEEDED, job.status());
+		assertEquals(List.of(JobLifecycleEventType.SUCCEEDED), publishedTypes());
+	}
+
+	@Test
+	void publishesAStartedEventWithTheRunnerOnceTheRunningReportIsApplied() {
+		var job = queuedJob();
+
+		recorder.record(JobStatusReport.running(job.id(), RUNNER, STARTED_AT));
+
+		assertEquals(1, published.size());
+		var event = published.get(0);
+		assertEquals(JobLifecycleEventType.STARTED, event.type());
+		assertEquals(job.id(), event.jobId());
+		assertEquals(STARTED_AT, event.occurredAt());
+		assertEquals(RUNNER, event.runner());
+		assertEquals("a1b2c3d4", event.revision());
+	}
+
+	@Test
+	void publishesASucceededEventWithTheExitCode() {
+		var job = runningJob();
+
+		recorder.record(JobStatusReport.succeeded(job.id(), RUNNER, STARTED_AT, COMPLETED_AT, 0));
+
+		assertEquals(List.of(JobLifecycleEventType.SUCCEEDED), publishedTypes());
+		var event = published.get(0);
+		assertEquals(COMPLETED_AT, event.occurredAt());
+		assertEquals(0, event.exitCode());
+		assertNull(event.failureCode());
+	}
+
+	@Test
+	void publishesAFailedEventWithTheFailureCodeAndTheExitCode() {
+		var job = runningJob();
+
+		recorder.record(JobStatusReport.failed(
+				job.id(), RUNNER, STARTED_AT, COMPLETED_AT, 2, JobExecutionFailureReason.NON_ZERO_EXIT, "exit 2"));
+
+		assertEquals(List.of(JobLifecycleEventType.FAILED), publishedTypes());
+		var event = published.get(0);
+		assertEquals(JobExecutionFailureReason.NON_ZERO_EXIT.name(), event.failureCode());
+		assertEquals(2, event.exitCode());
+	}
+
+	@Test
+	void publishesTheStartAndTheOutcomeWhenTheRunningReportWasLost() {
+		var job = queuedJob();
+
+		recorder.record(JobStatusReport.succeeded(job.id(), RUNNER, STARTED_AT, COMPLETED_AT, 0));
+
+		assertEquals(List.of(JobLifecycleEventType.STARTED, JobLifecycleEventType.SUCCEEDED), publishedTypes());
+		assertEquals(STARTED_AT, published.get(0).occurredAt());
+		assertEquals(COMPLETED_AT, published.get(1).occurredAt());
+	}
+
+	@Test
+	void publishesNothingForReportsThatDoNotChangeTheJob() {
+		var job = runningJob();
+		recorder.record(JobStatusReport.succeeded(job.id(), RUNNER, STARTED_AT, COMPLETED_AT, 0));
+		published.clear();
+
+		recorder.record(JobStatusReport.succeeded(job.id(), RUNNER, STARTED_AT, COMPLETED_AT, 0));
+		recorder.record(JobStatusReport.failed(
+				job.id(), RUNNER, STARTED_AT, COMPLETED_AT, 1, JobExecutionFailureReason.NON_ZERO_EXIT, "late"));
+		recorder.record(JobStatusReport.running(JobId.newId(), RUNNER, STARTED_AT));
+
+		assertTrue(published.isEmpty());
+	}
+
+	@Test
+	void publishesNothingWhenTheTransitionIsNotCommitted() {
+		var job = queuedJob();
+		var failingStore = new InMemoryJobStore() {
+			@Override
+			public <R> Optional<R> update(JobId jobId, Function<Job, R> change) {
+				throw new IllegalStateException("database unavailable");
+			}
+		};
+		failingStore.add(job);
+		var failingRecorder = new JobExecutionStatusRecorder(failingStore, published::add);
+
+		assertThrows(IllegalStateException.class,
+				() -> failingRecorder.record(JobStatusReport.running(job.id(), RUNNER, STARTED_AT)));
+
+		assertTrue(published.isEmpty());
 	}
 
 	@Test
@@ -292,6 +385,10 @@ class JobExecutionStatusRecorderTest {
 
 		assertSame(job, jobs.find(job.id()).orElseThrow());
 		assertFalse(job.status().isTerminal());
+	}
+
+	private List<JobLifecycleEventType> publishedTypes() {
+		return published.stream().map(JobLifecycleEvent::type).toList();
 	}
 
 	private Job queuedJob() {
