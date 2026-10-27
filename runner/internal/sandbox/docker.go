@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MohamedMBG/ZeroYaml/runner/internal/joblogs"
 )
 
 const (
@@ -141,16 +143,21 @@ type dockerStreamFunc func(context.Context, io.Writer, io.Writer, ...string) err
 
 func cliDockerStream(dockerBinary string) dockerStreamFunc {
 	return func(ctx context.Context, stdout io.Writer, stderr io.Writer, args ...string) error {
+		// Docker sends both container stderr and its own errors to the CLI's
+		// stderr pipe. Hold it until a successful exit before attributing it to
+		// the Job; the extra byte lets Capture detect truncation at its limit.
+		stderrOutput := &headBuffer{limit: joblogs.MaxOutputBytes + 1}
 		// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 		command := exec.CommandContext(ctx, dockerBinary, args...)
 		command.Stdout = stdout
-		command.Stderr = stderr
+		command.Stderr = stderrOutput
 		command.WaitDelay = commandWaitDelay
 		if err := command.Run(); err != nil {
 			// No command output is embedded in execution diagnostics.
 			return errors.New("docker output stream failed")
 		}
-		return nil
+		_, err := stderr.Write(stderrOutput.buffer.Bytes())
+		return err
 	}
 }
 

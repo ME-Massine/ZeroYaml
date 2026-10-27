@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -122,6 +123,18 @@ func TestReporterDisablesOnlyEmptyConfigurationAndRejectsPartialTLS(t *testing.T
 		if _, err := NewReporter(endpoint, runneridentity.Identity{}, time.Second, logger); err == nil {
 			t.Fatal("partial or unreadable TLS configuration accepted")
 		}
+	}
+}
+
+func TestReporterRejectsMalformedLogAddressBeforeConnecting(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for _, address := range []string{"localhost", ":50053", "localhost:http", "localhost:0", "localhost:70000", "https://localhost:50053"} {
+		t.Run(address, func(t *testing.T) {
+			_, err := NewReporter(Endpoint{Address: address, Certificate: "missing", PrivateKey: "missing", CA: "missing"}, runneridentity.Identity{}, time.Second, logger)
+			if err == nil || !strings.Contains(err.Error(), "ZEROYAML_JOB_LOGS_ADDRESS") {
+				t.Fatalf("address %q: expected startup validation error, got %v", address, err)
+			}
+		})
 	}
 }
 

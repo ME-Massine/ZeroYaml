@@ -846,7 +846,10 @@ most 32 Jobs' logs in memory through `JobLogStore.snapshot`. Only finished
 output can be evicted; full active retention refuses new Jobs' logs. Restart
 loses all logs. There is no REST/UI log viewer. Raw command bytes are
 excluded from operational logs; arbitrary secrets printed by a command are
-not automatically redacted. See [Runner job logs](./docs/architecture/runner-job-logs.md).
+not automatically redacted. Job stderr is delivered after Docker log following
+completes so a failed Docker CLI cannot contribute diagnostics as Job output.
+An invalid `ZEROYAML_JOB_LOGS_ADDRESS` fails Runner startup.
+See [Runner job logs](./docs/architecture/runner-job-logs.md).
 
 `runner/internal/sandbox` runs every accepted Job in Docker; the Runner never
 executes a Job command on its host. At startup the Runner probes the Docker

@@ -13,6 +13,13 @@ An exit observed before the execution deadline remains the command outcome
 even if log following is interrupted by that deadline.
 Following reads retained output even when the command exited before the CLI
 attached. Docker demultiplexes stdout and stderr into separate CLI pipes.
+The Docker CLI also writes its own errors to stderr. The Runner holds at most
+1 MiB plus one byte from that pipe and forwards it as Job stderr only when the
+CLI exits successfully. On CLI failure, the Runner discards that pipe and marks
+capture incomplete. Stdout remains live; stderr is delivered after log following
+finishes, so cross-stream sequence reflects delivery order rather than the
+command's write order. The extra byte preserves truncation detection at the
+capture limit.
 
 `runner/internal/joblogs.Capture` serializes pipe observations and emits chunks
 of at most 4096 raw bytes. Partial lines, binary output, and split UTF-8 sequences
@@ -121,7 +128,9 @@ listener requires mutual TLS using gRPC transport credentials
 ([gRPC authentication guide](https://grpc.io/docs/guides/auth/)); there is no
 insecure mode. A partial configuration or unreadable/invalid certificate fails
 startup rather than silently downgrading delivery. A Runner with delivery disabled
-still drains command output and reports execution status.
+still drains command output and reports execution status. The Runner validates
+the configured log address as a TCP host and numeric port from 1 to 65535
+during startup, before the first log RPC.
 
 Provision certificates outside the repository through the deployment's PKI:
 

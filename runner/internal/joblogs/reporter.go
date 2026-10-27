@@ -6,7 +6,10 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	runnerv1 "github.com/MohamedMBG/ZeroYaml/runner/gen/runner/v1"
@@ -43,6 +46,14 @@ func NewReporter(endpoint Endpoint, identity runneridentity.Identity, timeout ti
 	}
 	if endpoint.Address == "" || endpoint.Certificate == "" || endpoint.PrivateKey == "" || endpoint.CA == "" {
 		return nil, fmt.Errorf("job logs require ZEROYAML_JOB_LOGS_ADDRESS, CERTIFICATE, PRIVATE_KEY, and CA")
+	}
+	host, port, err := net.SplitHostPort(endpoint.Address)
+	if err != nil || host == "" || strings.Contains(host, "/") {
+		return nil, fmt.Errorf("ZEROYAML_JOB_LOGS_ADDRESS must be a TCP address in host:port form")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return nil, fmt.Errorf("ZEROYAML_JOB_LOGS_ADDRESS must use a numeric port between 1 and 65535")
 	}
 	certificate, err := tls.LoadX509KeyPair(endpoint.Certificate, endpoint.PrivateKey)
 	if err != nil {
