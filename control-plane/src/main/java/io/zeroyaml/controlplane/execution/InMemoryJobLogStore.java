@@ -48,12 +48,14 @@ class InMemoryJobLogStore implements JobLogStore {
 		if (record.sequence() < expected) {
 			throw new JobLogSequenceException("log sequence must increase");
 		}
-		// Failed chunks must not poison subsequent delivery. Sequence gaps stay
-		// visible and require an incomplete final marker.
+		// Missing retained chunks can also result from idle eviction after delivery
+		// was acknowledged. The sender cannot detect that loss, so normalize the
+		// retained final marker instead of rejecting its completeness claim.
 		boolean missingChunks = record.sequence() > expected
 				|| (previous != null && previous.sequence() > existing.size());
 		if (record.endOfOutput() && missingChunks && !record.incomplete()) {
-			throw new JobLogSequenceException("sequence gaps require an incomplete final marker");
+			record = new JobLogRecord(record.jobId(), record.reportedBy(), record.sequence(),
+					record.observedAt(), record.stream(), record.content(), true, record.truncated(), true);
 		}
 		int bytes = existing == null ? 0 : existing.stream().mapToInt(JobLogRecord::contentSize).sum();
 		if (bytes + record.contentSize() > JobLogRecord.MAX_OUTPUT_BYTES) {

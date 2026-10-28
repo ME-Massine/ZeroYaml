@@ -162,10 +162,21 @@ class GrpcJobLogServiceTest {
 	void refusesOutOfOrderDuplicateAndPostFinalChunks() {
 		client.appendJobLog(request(job, 1).build());
 		assertStatus(Status.Code.FAILED_PRECONDITION, request(job, 1).build());
-		assertStatus(Status.Code.FAILED_PRECONDITION, end(job, 3).build());
 		client.appendJobLog(end(job, 2).build());
 		assertStatus(Status.Code.FAILED_PRECONDITION, request(job, 3).build());
 		assertEquals(2, logs.snapshot(job.id()).size());
+	}
+
+	@Test
+	void finalMarkerWithMissingRetainedChunksIsAcknowledgedAndNormalized() {
+		client.appendJobLog(request(job, 2).build());
+		client.appendJobLog(end(job, 3).build());
+		var marker = logs.snapshot(job.id()).getLast();
+		assertTrue(marker.endOfOutput());
+		assertTrue(marker.incomplete());
+		assertFalse(marker.truncated());
+		assertEquals(3, marker.sequence());
+		assertStatus(Status.Code.FAILED_PRECONDITION, end(job, 4).build());
 	}
 
 	@Test
@@ -250,13 +261,14 @@ class GrpcJobLogServiceTest {
 	}
 
 	@Test
-	void acceptsLaterChunksAfterDeliveryLossAndRequiresIncompleteFinalMarker() {
+	void acceptsLaterChunksAfterDeliveryLossAndPreservesExplicitFinalFlags() {
 		client.appendJobLog(request(job, 2).build());
 		client.appendJobLog(request(job, 4).build());
 		assertStatus(Status.Code.FAILED_PRECONDITION, request(job, 3).build());
-		assertStatus(Status.Code.FAILED_PRECONDITION, end(job, 5).build());
 		client.appendJobLog(end(job, 5).setIncomplete(true).setTruncated(true).build());
 		assertEquals(List.of(2L, 4L, 5L), logs.snapshot(job.id()).stream().map(JobLogRecord::sequence).toList());
+		assertTrue(logs.snapshot(job.id()).getLast().incomplete());
+		assertTrue(logs.snapshot(job.id()).getLast().truncated());
 	}
 
 	@Test

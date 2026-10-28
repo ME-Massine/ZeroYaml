@@ -141,7 +141,7 @@ func TestRunCancellationDuringCaptureCleansResourcesAndMarksIncomplete(t *testin
 	s := newTestSandbox(docker)
 	s.logs = sink
 	s.stream = func(streamCtx context.Context, stdout, stderr io.Writer, _ ...string) error {
-		stdout.Write([]byte("before cancellation"))
+		stderr.Write([]byte("failure diagnostics before cancellation"))
 		cancel()
 		<-streamCtx.Done()
 		return streamCtx.Err()
@@ -151,6 +151,9 @@ func TestRunCancellationDuringCaptureCleansResourcesAndMarksIncomplete(t *testin
 	result := s.Run(ctx, testSpec())
 	if result.Outcome != OutcomeCancelled {
 		t.Fatalf("outcome = %s", result.Outcome)
+	}
+	if len(sink.records) < 2 || sink.records[0].Stream != joblogs.Stderr || string(sink.records[0].Content) != "failure diagnostics before cancellation" {
+		t.Fatalf("stderr before cancellation was lost: %+v", sink.records)
 	}
 	if !sink.records[len(sink.records)-1].Incomplete {
 		t.Fatal("cancellation not marked")

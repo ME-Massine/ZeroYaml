@@ -8,18 +8,18 @@ credentials. No host environment variables are added to Job containers.
 ## Capture and delivery
 
 The sandbox creates a non-TTY Job container, starts it, runs `docker wait`
-alongside `docker logs --follow`, and removes the container after both finish.
+alongside an Engine follow-logs request through `docker system dial-stdio`, and
+removes the container after both finish. The CLI supplies the configured daemon
+transport, including Windows named pipes, without adding a Docker SDK.
 An exit observed before the execution deadline remains the command outcome
 even if log following is interrupted by that deadline.
 Following reads retained output even when the command exited before the CLI
-attached. Docker demultiplexes stdout and stderr into separate CLI pipes.
-The Docker CLI also writes its own errors to stderr. The Runner holds at most
-1 MiB plus one byte from that pipe and forwards it as Job stderr only when the
-CLI exits successfully. On CLI failure, the Runner discards that pipe and marks
-capture incomplete. Stdout remains live; stderr is delivered after log following
-finishes, so cross-stream sequence reflects delivery order rather than the
-command's write order. The extra byte preserves truncation detection at the
-capture limit.
+attached. The Runner reads the HTTP response and decodes non-TTY Engine frames
+into stdout and stderr. Docker CLI stderr is discarded separately, so a CLI
+diagnostic cannot be attributed to the Job. Container bytes are forwarded as
+frames arrive, including stderr written before a
+cancelled follower exits. A follower error marks output incomplete without
+copying pipe contents into execution diagnostics.
 
 `runner/internal/joblogs.Capture` serializes pipe observations and emits chunks
 of at most 4096 raw bytes. Partial lines, binary output, and split UTF-8 sequences
@@ -72,7 +72,8 @@ marker; marking an output-source error does not wait for delivery.
 ## Resource and retention bounds
 
 Capture sends at most 256 data chunks plus one final marker, keeping only the
-current chunk and the fixed CLI pipe buffers in Runner memory. The combined
+current chunk, an eight-byte frame header, and a fixed 4096-byte frame buffer in
+Runner memory, alongside fixed CLI pipe buffers. The combined
 stdout/stderr byte budget is 1 MiB. Very small writes can exhaust the chunk
 budget first. Docker's Job log driver is explicitly `local`, with `max-size=10m`
 and `max-file=1` (compression disabled, as required for a single file); its
@@ -93,8 +94,11 @@ not lock or update the PostgreSQL Job row. Unknown Jobs return
 sequence conflicts, and post-final records return `FAILED_PRECONDITION`.
 Unexpected storage failures return `INTERNAL`, without exposing storage details.
 Data chunks may skip missing sequence numbers after a delivery failure; a final
-marker following any gap must be incomplete. Duplicate and decreasing sequences
-are refused rather than retained twice. Receiving logs for a terminal Job is valid,
+marker following any gap is retained as incomplete, even if the sender reports
+complete delivery: acknowledged chunks may have been evicted locally. The
+server preserves the sender's sequence, timestamp, and truncation flag.
+Duplicate and decreasing sequences are refused rather than retained twice.
+Receiving logs for a terminal Job is valid,
 because status and output are separate observations.
 
 `JobLogStore` is the application-facing retention boundary. The in-memory
@@ -106,7 +110,9 @@ appends refresh it; snapshots and rejected records do not. Recent active output
 is preserved. If all 32 slots have recent unfinished output, a new Job's chunks
 and final marker return `RESOURCE_EXHAUSTED` without changing existing output.
 Once a slot is available, later chunks from that sender can be admitted with
-their original sequences and an incomplete end. Missing final markers therefore
+their original sequences; the store marks the final record incomplete when
+earlier chunks are absent, including when only the final marker returns.
+Missing final markers therefore
 cannot occupy capacity indefinitely. Eviction happens only when admitting a new
 Job at capacity, with no background sweep. A running Job silent for five minutes
 can also lose its earlier output; late records may form a new retained fragment,
@@ -128,9 +134,7 @@ listener requires mutual TLS using gRPC transport credentials
 ([gRPC authentication guide](https://grpc.io/docs/guides/auth/)); there is no
 insecure mode. A partial configuration or unreadable/invalid certificate fails
 startup rather than silently downgrading delivery. A Runner with delivery disabled
-still drains command output and reports execution status. The Runner validates
-the configured log address as a TCP host and numeric port from 1 to 65535
-during startup, before the first log RPC.
+still drains command output and reports execution status.
 
 Provision certificates outside the repository through the deployment's PKI:
 

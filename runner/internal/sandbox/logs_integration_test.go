@@ -31,6 +31,7 @@ func TestDockerExecutionLogCapture(t *testing.T) {
 		{name: "failed command", command: "printf hello; printf error >&2; exit 7", wantCode: 7},
 		{name: "large output", command: "head -c 2097152 /dev/zero", large: true},
 		{name: "cancel while following", command: "printf 'ready\\n'; sleep 300", cancel: true},
+		{name: "cancel after stderr", command: "printf 'failure diagnostics\\n' >&2; sleep 300", cancel: true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -91,7 +92,11 @@ func TestDockerExecutionLogCapture(t *testing.T) {
 					t.Fatalf("large output bytes = %d, chunks = %d", stdout.Len(), len(sink.records))
 				}
 			case scenario.cancel:
-				if stdout.String() != "ready\n" {
+				if scenario.name == "cancel after stderr" {
+					if stderr.String() != "failure diagnostics\n" {
+						t.Fatalf("stderr = %q", stderr.String())
+					}
+				} else if stdout.String() != "ready\n" {
 					t.Fatalf("stdout = %q", stdout.String())
 				}
 			default:

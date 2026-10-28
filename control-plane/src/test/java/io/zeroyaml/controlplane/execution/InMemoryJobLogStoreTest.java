@@ -67,17 +67,34 @@ class InMemoryJobLogStoreTest {
 	}
 
 	@Test
-	void lateOutputAfterEvictionRetainsItsOriginalSequenceAndRequiresIncompleteEnd() {
+	void lateOutputAfterEvictionRetainsItsOriginalSequenceAndNormalizesEnd() {
 		var admitted = fillRetention();
 		when(clock.instant()).thenReturn(NOW.plusSeconds(300));
 		logs.append(record(JobId.newId(), 1));
 		var resumed = admitted.getFirst();
 		logs.append(record(resumed, 2));
 		assertEquals(2, logs.snapshot(resumed).getFirst().sequence());
-		assertThrows(JobLogSequenceException.class, () -> logs.append(
-				new JobLogRecord(resumed, RUNNER, 3, NOW, JobLogRecord.Stream.NONE, new byte[0], true, false, false)));
-		logs.append(new JobLogRecord(resumed, RUNNER, 3, NOW, JobLogRecord.Stream.NONE, new byte[0], true, true, true));
+		logs.append(new JobLogRecord(resumed, RUNNER, 3, NOW, JobLogRecord.Stream.NONE, new byte[0], true, false, false));
+		assertEquals(2, logs.snapshot(resumed).size());
+		assertEquals(3, logs.snapshot(resumed).getLast().sequence());
+		assertTrue(logs.snapshot(resumed).getLast().endOfOutput());
+		assertFalse(logs.snapshot(resumed).getLast().truncated());
 		assertTrue(logs.snapshot(resumed).getLast().incomplete());
+	}
+
+	@Test
+	void finalMarkerAloneAfterEvictionIsAcceptedAndMarkedIncomplete() {
+		var evicted = fillRetention().getFirst();
+		when(clock.instant()).thenReturn(NOW.plusSeconds(300));
+		logs.append(record(JobId.newId(), 1));
+		logs.append(new JobLogRecord(evicted, RUNNER, 2, NOW, JobLogRecord.Stream.NONE, new byte[0], true, true, false));
+		var retained = logs.snapshot(evicted);
+		assertEquals(1, retained.size());
+		assertEquals(2, retained.getFirst().sequence());
+		assertTrue(retained.getFirst().endOfOutput());
+		assertTrue(retained.getFirst().incomplete());
+		assertTrue(retained.getFirst().truncated());
+		assertThrows(JobLogSequenceException.class, () -> logs.append(record(evicted, 3)));
 	}
 
 	private List<JobId> fillRetention() {

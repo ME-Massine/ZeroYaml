@@ -842,12 +842,15 @@ services. The existing registration/status endpoint does not serve logs. Capture
 retains at most 1 MiB or 256 data chunks per Job, followed by a final marker identifying truncation
 or interruption. Delivery uses `ZEROYAML_RUNNER_STATUS_REPORT_TIMEOUT` for each
 call; failures do not change execution status. The Control Plane retains at
-most 32 Jobs' logs in memory through `JobLogStore.snapshot`. Only finished
-output can be evicted; full active retention refuses new Jobs' logs. Restart
+most 32 Jobs' logs in memory through `JobLogStore.snapshot`. Finished output or
+streams idle for at least five minutes can be evicted; full retention with recent
+active output refuses new Jobs' logs. Final markers after retention loss are
+accepted and stored as incomplete. Restart
 loses all logs. There is no REST/UI log viewer. Raw command bytes are
 excluded from operational logs; arbitrary secrets printed by a command are
-not automatically redacted. Job stderr is delivered after Docker log following
-completes so a failed Docker CLI cannot contribute diagnostics as Job output.
+not automatically redacted. Job output is read from Docker Engine frames over
+`docker system dial-stdio`; container stderr streams immediately while Docker
+CLI diagnostics remain separate and are discarded.
 An invalid `ZEROYAML_JOB_LOGS_ADDRESS` fails Runner startup.
 See [Runner job logs](./docs/architecture/runner-job-logs.md).
 
