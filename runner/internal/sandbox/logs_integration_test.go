@@ -3,6 +3,8 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"testing"
@@ -29,6 +31,7 @@ func TestDockerExecutionLogCapture(t *testing.T) {
 	}{
 		{name: "stdout and stderr", command: "printf hello; printf error >&2"},
 		{name: "failed command", command: "printf hello; printf error >&2; exit 7", wantCode: 7},
+		{name: "short lines", command: "i=0; while [ $i -lt 3000 ]; do printf 'line %04d\\n' $i; i=$((i+1)); done"},
 		{name: "large output", command: "head -c 2097152 /dev/zero", large: true},
 		{name: "cancel while following", command: "printf 'ready\\n'; sleep 300", cancel: true},
 		{name: "cancel after stderr", command: "printf 'failure diagnostics\\n' >&2; sleep 300", cancel: true},
@@ -37,14 +40,13 @@ func TestDockerExecutionLogCapture(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			sink := &logSink{}
+			s := New("docker", slog.New(slog.DiscardHandler), sink)
 			if scenario.cancel {
-				sink.onAppend = func(record joblogs.Record) {
-					if len(record.Content) > 0 {
-						cancel()
-					}
+				follow := s.stream
+				s.stream = func(ctx context.Context, stdout, stderr io.Writer, containerID string) error {
+					return follow(ctx, cancelAfterWrite{Writer: stdout, cancel: cancel}, cancelAfterWrite{Writer: stderr, cancel: cancel}, containerID)
 				}
 			}
-			s := New("docker", slog.New(slog.DiscardHandler), sink)
 			id, err := newExecutionID()
 			if err != nil {
 				t.Fatal(err)
@@ -59,7 +61,7 @@ func TestDockerExecutionLogCapture(t *testing.T) {
 			spec.Command = []string{"sh", "-c", scenario.command}
 			spec.WorkingDirectory = "/workspace"
 			capture := joblogs.NewCapture(ctx, spec.JobID, sink)
-			code, err := s.runContainer(ctx, ctx, id, names.job, jobCreateArgs(spec, names), capture)
+			code, err := s.runContainer(ctx, ctx, id, names.job, jobCreateArgs(spec, names, true), capture)
 			if closeErr := capture.Close(context.Background(), ctx.Err() != nil); closeErr != nil {
 				t.Fatal(closeErr)
 			}
@@ -87,6 +89,14 @@ func TestDockerExecutionLogCapture(t *testing.T) {
 				t.Fatalf("final marker: %+v", last)
 			}
 			switch {
+			case scenario.name == "short lines":
+				var expected bytes.Buffer
+				for i := 0; i < 3000; i++ {
+					fmt.Fprintf(&expected, "line %04d\n", i)
+				}
+				if !bytes.Equal(stdout.Bytes(), expected.Bytes()) || len(sink.records)-1 != (expected.Len()+joblogs.MaxChunkBytes-1)/joblogs.MaxChunkBytes {
+					t.Fatal("real Engine short lines truncated or not coalesced")
+				}
 			case scenario.large:
 				if stdout.Len() != joblogs.MaxOutputBytes || len(sink.records) != joblogs.MaxChunks+1 {
 					t.Fatalf("large output bytes = %d, chunks = %d", stdout.Len(), len(sink.records))

@@ -285,6 +285,27 @@ class GrpcJobLogServiceTest {
 		assertFalse(record.toString().contains("sensitive-output"));
 	}
 
+	@Test
+	void unexpectedLookupFailureIsLoggedWithJobIdentityAndWithoutChunkContent() {
+		var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(GrpcJobLogService.class);
+		var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			doThrow(new IllegalStateException("database unavailable")).when(jobs).find(job.id());
+			assertStatus(Status.Code.INTERNAL, request(job, 1).setContent(ByteString.copyFromUtf8("sensitive-chunk")).build());
+			assertEquals(1, appender.list.size());
+			var event = appender.list.getFirst();
+			assertEquals(ch.qos.logback.classic.Level.ERROR, event.getLevel());
+			assertTrue(event.getFormattedMessage().contains(job.id().value().toString()));
+			assertFalse(event.getFormattedMessage().contains("sensitive-chunk"));
+			assertEquals(IllegalStateException.class.getName(), event.getThrowableProxy().getClassName());
+		} finally {
+			logger.detachAppender(appender);
+			appender.stop();
+		}
+	}
+
 	private void assertStatus(Status.Code code, AppendJobLogRequest request) {
 		var error = assertThrows(StatusRuntimeException.class, () -> client.appendJobLog(request));
 		assertEquals(code, error.getStatus().getCode());

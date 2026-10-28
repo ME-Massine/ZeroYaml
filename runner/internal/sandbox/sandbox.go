@@ -81,16 +81,17 @@ type dockerFunc func(ctx context.Context, args ...string) (string, error)
 // Sandbox runs Jobs in Docker containers. It holds no per-execution state, so
 // one instance may run concurrent executions.
 type Sandbox struct {
-	docker         dockerFunc
-	stream         dockerStreamFunc
-	logs           joblogs.Sink
-	newID          func() (string, error)
-	cleanupTimeout time.Duration
-	logger         *slog.Logger
+	docker          dockerFunc
+	stream          dockerStreamFunc
+	logs            joblogs.Sink
+	newID           func() (string, error)
+	cleanupTimeout  time.Duration
+	logCloseTimeout time.Duration
+	logger          *slog.Logger
 }
 
 // New creates a Sandbox that drives the Docker CLI found at dockerBinary and
-// delivers bounded Job output to logs. A nil sink drains output without retention.
+// delivers bounded Job output to logs. A nil sink disables log following.
 func New(dockerBinary string, logger *slog.Logger, logs joblogs.Sink) *Sandbox {
 	s := newSandbox(cliDocker(dockerBinary), newExecutionID, defaultCleanupTimeout, logger)
 	s.stream = cliDockerStream(dockerBinary)
@@ -108,7 +109,10 @@ func newSandbox(
 		docker:         docker,
 		newID:          newID,
 		cleanupTimeout: cleanupTimeout,
-		logger:         logger,
+		// Reserve shutdown time for terminal status after log flush and cleanup.
+		// Keep this below the default Runner ShutdownTimeout (5 seconds).
+		logCloseTimeout: time.Second,
+		logger:          logger,
 	}
 }
 
@@ -124,7 +128,13 @@ func (s *Sandbox) Run(ctx context.Context, spec Spec) Result {
 	capture := joblogs.NewCapture(runCtx, spec.JobID, s.logs)
 	interrupted := false
 	defer func() {
-		if err := capture.Close(context.WithoutCancel(ctx), interrupted); err != nil {
+		closeCtx := context.WithoutCancel(ctx)
+		if ctx.Err() != nil {
+			var closeCancel context.CancelFunc
+			closeCtx, closeCancel = context.WithTimeout(closeCtx, s.logCloseTimeout)
+			defer closeCancel()
+		}
+		if err := capture.Close(closeCtx, interrupted); err != nil {
 			s.logger.WarnContext(ctx, "job output final marker was not acknowledged")
 		}
 	}()
@@ -169,7 +179,7 @@ func (s *Sandbox) run(ctx context.Context, runCtx context.Context, executionID s
 		}
 	}
 
-	exitCode, err := s.runContainer(ctx, runCtx, executionID, names.job, jobCreateArgs(spec, names), capture)
+	exitCode, err := s.runContainer(ctx, runCtx, executionID, names.job, jobCreateArgs(spec, names, s.logs != nil), capture)
 	if err != nil {
 		return s.interrupted(ctx, runCtx, spec, "job command", err)
 	}
@@ -227,10 +237,10 @@ func (s *Sandbox) runContainer(
 		output, err := s.docker(runCtx, "wait", containerID)
 		wait <- waitResult{output, err}
 	}()
-	if capture != nil && s.stream != nil {
+	if s.logs != nil && capture != nil && s.stream != nil {
 		// Following after start also reads output from a command that already
 		// exited. Checkout output is excluded because it can contain credentials.
-		if err := s.stream(runCtx, capture.Writer(joblogs.Stdout), capture.Writer(joblogs.Stderr), "logs", "--follow", containerID); err != nil {
+		if err := s.stream(runCtx, capture.Writer(joblogs.Stdout), capture.Writer(joblogs.Stderr), containerID); err != nil {
 			capture.MarkIncomplete()
 			s.logger.WarnContext(ctx, "job log capture interrupted", slog.String("execution_id", executionID))
 		}

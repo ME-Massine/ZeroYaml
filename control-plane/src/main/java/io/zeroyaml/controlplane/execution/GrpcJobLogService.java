@@ -3,6 +3,9 @@ package io.zeroyaml.controlplane.execution;
 import java.time.Instant;
 import java.util.UUID;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import io.zeroyaml.contracts.runner.v1.AppendJobLogRequest;
@@ -14,12 +17,14 @@ import io.zeroyaml.controlplane.runner.RunnerProtocolVersion;
 
 /** Bounded log ingress registered only on the authenticated TLS listener. */
 class GrpcJobLogService extends JobLogServiceGrpc.JobLogServiceImplBase {
+	private static final Logger log = LoggerFactory.getLogger(GrpcJobLogService.class);
 	private final JobLogRecorder recorder;
 
 	GrpcJobLogService(JobLogRecorder recorder) { this.recorder = recorder; }
 
 	@Override
 	public void appendJobLog(AppendJobLogRequest request, StreamObserver<AppendJobLogResponse> observer) {
+		JobId jobId = null;
 		try {
 			var principal = JobLogAuthentication.RUNNER_ID.get();
 			if (principal == null) {
@@ -27,6 +32,7 @@ class GrpcJobLogService extends JobLogServiceGrpc.JobLogServiceImplBase {
 				return;
 			}
 			var record = toRecord(request);
+			jobId = record.jobId();
 			if (!principal.equals(record.reportedBy().runnerId())) {
 				observer.onError(Status.PERMISSION_DENIED.withDescription("Runner certificate identity mismatch").asRuntimeException());
 				return;
@@ -44,6 +50,7 @@ class GrpcJobLogService extends JobLogServiceGrpc.JobLogServiceImplBase {
 		} catch (JobLogAttributionException | JobLogSequenceException exception) {
 			observer.onError(Status.FAILED_PRECONDITION.withDescription("Job log attribution or sequence conflict").asRuntimeException());
 		} catch (RuntimeException exception) {
+			log.error("Job log storage failed for jobId={}", jobId, exception);
 			observer.onError(Status.INTERNAL.withDescription("Job log storage failed").withCause(exception).asRuntimeException());
 		}
 	}

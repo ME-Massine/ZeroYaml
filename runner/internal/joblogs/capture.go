@@ -46,6 +46,7 @@ type Sink interface {
 // no background queue. Slow delivery applies backpressure to the Docker CLI.
 // Failed chunks are not retried; delivery stops after two failures so a stalled
 // ingress cannot consume the Job deadline one chunk at a time.
+// One pending chunk coalesces writes until full, a stream switch, or Close.
 // Cross-pipe ordering reflects observation, not write time.
 type Capture struct {
 	mu               sync.Mutex
@@ -58,6 +59,9 @@ type Capture struct {
 	sequence         uint64
 	bytes            int
 	chunks           int
+	pending          []byte
+	pendingStream    Stream
+	pendingAt        time.Time
 	deliveryFailures int
 	truncated        bool
 	incomplete       bool
@@ -97,37 +101,66 @@ func (w streamWriter) Write(p []byte) (int, error) {
 		c.mu.Unlock()
 		return n, nil
 	}
+	if c.ctx.Err() != nil {
+		c.mu.Lock()
+		c.incomplete = true
+		c.truncated = c.truncated || n > 0
+		c.mu.Unlock()
+		return n, nil
+	}
 	for len(p) > 0 {
 		c.mu.Lock()
-		if c.closed {
-			c.mu.Unlock()
-			break
-		}
-		if c.deliveryFailures >= 2 {
-			c.mu.Unlock()
-			break
-		}
-		if c.chunks == MaxChunks || c.bytes == MaxOutputBytes {
-			c.truncated = true
-			c.mu.Unlock()
-			break
-		}
-		size := min(len(p), MaxChunkBytes, MaxOutputBytes-c.bytes)
-		c.sequence++
-		record := Record{JobID: c.jobID, Sequence: c.sequence, ObservedAt: c.now().UTC(), Stream: w.stream, Content: append([]byte(nil), p[:size]...)}
-		c.bytes += size
-		c.chunks++
-		c.mu.Unlock()
-		if c.sink != nil && c.sink.Append(c.ctx, record) != nil {
-			c.mu.Lock()
-			c.deliveryFailures++
+		if c.closed || c.ctx.Err() != nil {
 			c.incomplete = true
 			c.truncated = true
 			c.mu.Unlock()
+			break
 		}
+		if c.deliveryFailures >= 2 || c.chunks == MaxChunks || c.bytes == MaxOutputBytes {
+			c.truncated = true
+			c.mu.Unlock()
+			break
+		}
+		c.mu.Unlock()
+		if len(c.pending) > 0 && c.pendingStream != w.stream {
+			c.flush(c.ctx)
+			continue
+		}
+		if len(c.pending) == 0 {
+			c.pending = make([]byte, 0, MaxChunkBytes)
+			c.pendingStream = w.stream
+			c.pendingAt = c.now().UTC()
+		}
+		size := min(len(p), MaxChunkBytes-len(c.pending), MaxOutputBytes-c.bytes)
+		c.pending = append(c.pending, p[:size]...)
+		c.bytes += size
 		p = p[size:]
+		if len(c.pending) == MaxChunkBytes {
+			c.flush(c.ctx)
+		}
 	}
 	return n, nil
+}
+
+// flush requires the delivery token. A record owns its bytes after delivery;
+// the next pending buffer never reuses them. No state lock spans a Sink call.
+func (c *Capture) flush(ctx context.Context) {
+	if len(c.pending) == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.sequence++
+	c.chunks++
+	record := Record{JobID: c.jobID, Sequence: c.sequence, ObservedAt: c.pendingAt, Stream: c.pendingStream, Content: c.pending}
+	c.pending = nil
+	c.mu.Unlock()
+	if c.sink != nil && c.sink.Append(ctx, record) != nil {
+		c.mu.Lock()
+		c.deliveryFailures++
+		c.incomplete = true
+		c.truncated = true
+		c.mu.Unlock()
+	}
 }
 
 // MarkIncomplete records a failure in the output source without changing the
@@ -159,6 +192,7 @@ func (c *Capture) Close(ctx context.Context, interrupted bool) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	c.flush(ctx)
 	c.mu.Lock()
 	c.sequence++
 	record := Record{JobID: c.jobID, Sequence: c.sequence, ObservedAt: c.now().UTC(), EndOfOutput: true, Truncated: c.truncated, Incomplete: c.incomplete || interrupted}

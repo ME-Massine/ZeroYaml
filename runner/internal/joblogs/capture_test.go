@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -76,15 +77,9 @@ func TestCaptureBoundsLargeOutputAndContinuesDraining(t *testing.T) {
 func TestCaptureBoundsTinyWritesAcrossBothStreams(t *testing.T) {
 	sink := &recordingSink{}
 	capture := NewCapture(context.Background(), "tiny-writes", sink)
-	var writers sync.WaitGroup
-	for _, stream := range []Stream{Stdout, Stderr} {
-		writers.Go(func() {
-			for i := 0; i < MaxChunks; i++ {
-				capture.Writer(stream).Write([]byte("x"))
-			}
-		})
+	for i := 0; i < MaxChunks*2; i++ {
+		capture.Writer(Stream(i%2 + 1)).Write([]byte("x"))
 	}
-	writers.Wait()
 	capture.Close(context.Background(), false)
 	if len(sink.records) != MaxChunks+1 || !sink.records[MaxChunks].Truncated {
 		t.Fatal("chunk count not bounded")
@@ -146,7 +141,7 @@ func TestCloseCancelsBlockedDeliveryAndMarkIncompleteDoesNotWait(t *testing.T) {
 		return ctx.Err()
 	}))
 	written := make(chan struct{})
-	go func() { capture.Writer(Stdout).Write([]byte("pending")); close(written) }()
+	go func() { capture.Writer(Stdout).Write(make([]byte, MaxChunkBytes)); close(written) }()
 	<-entered
 	marked := make(chan struct{})
 	go func() { capture.MarkIncomplete(); close(marked) }()
@@ -163,5 +158,80 @@ func TestCloseCancelsBlockedDeliveryAndMarkIncompleteDoesNotWait(t *testing.T) {
 	<-written
 	if final := <-finished; !final.Incomplete || !final.Truncated || final.Sequence != 2 {
 		t.Fatalf("final = %+v", final)
+	}
+}
+
+func TestCaptureCoalescesShortLines(t *testing.T) {
+	sink := &recordingSink{}
+	capture := NewCapture(context.Background(), "lines", sink)
+	var input bytes.Buffer
+	for i := 0; i < 3000; i++ {
+		line := []byte(fmt.Sprintf("line %04d\n", i))
+		input.Write(line)
+		capture.Writer(Stdout).Write(line)
+	}
+	capture.Close(context.Background(), false)
+	var output bytes.Buffer
+	for _, record := range sink.records {
+		output.Write(record.Content)
+	}
+	if !bytes.Equal(output.Bytes(), input.Bytes()) || len(sink.records)-1 != (input.Len()+MaxChunkBytes-1)/MaxChunkBytes || sink.records[len(sink.records)-1].Truncated {
+		t.Fatal("short lines lost or not coalesced")
+	}
+}
+
+func TestCaptureAlternatingStreamsKeepObservationOrder(t *testing.T) {
+	sink := &recordingSink{}
+	capture := NewCapture(context.Background(), "alternating", sink)
+	for i := 0; i < 20; i++ {
+		capture.Writer(Stream(i%2 + 1)).Write([]byte{byte(i)})
+	}
+	capture.Close(context.Background(), false)
+	for i, record := range sink.records[:20] {
+		if record.Sequence != uint64(i+1) || record.Stream != Stream(i%2+1) || !bytes.Equal(record.Content, []byte{byte(i)}) {
+			t.Fatal("observation order changed")
+		}
+	}
+}
+
+func TestCloseFlushesPendingBytesAfterExecutionCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sink := &recordingSink{}
+	capture := NewCapture(ctx, "cancel", sink)
+	capture.Writer(Stderr).Write([]byte("diagnostics"))
+	cancel()
+	capture.Close(context.Background(), true)
+	if len(sink.records) != 2 || string(sink.records[0].Content) != "diagnostics" || !sink.records[1].EndOfOutput || !sink.records[1].Incomplete {
+		t.Fatal("pending output lost on cancellation")
+	}
+}
+
+func TestConcurrentCapturePreservesEachStreamsBytes(t *testing.T) {
+	sink := &recordingSink{}
+	capture := NewCapture(context.Background(), "concurrent", sink)
+	var writers sync.WaitGroup
+	for _, stream := range []Stream{Stdout, Stderr} {
+		writers.Go(func() {
+			for i := 0; i < 100; i++ {
+				capture.Writer(stream).Write([]byte{byte(stream)})
+			}
+		})
+	}
+	writers.Wait()
+	capture.Close(context.Background(), false)
+	counts := map[Stream]int{}
+	for i, record := range sink.records {
+		if record.Sequence != uint64(i+1) {
+			t.Fatal("sequence changed")
+		}
+		for _, b := range record.Content {
+			if b != byte(record.Stream) {
+				t.Fatal("stream bytes changed")
+			}
+			counts[record.Stream]++
+		}
+	}
+	if counts[Stdout] != 100 || counts[Stderr] != 100 {
+		t.Fatal("concurrent output lost")
 	}
 }

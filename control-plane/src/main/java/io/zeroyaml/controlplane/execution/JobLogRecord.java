@@ -11,7 +11,7 @@ import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
  * contain sensitive user output and must never enter operational logging.
  * Sequence orders observations across both pipes; timestamps are Runner time.
  */
-public record JobLogRecord(JobId jobId, RunnerAssignment reportedBy, long sequence,
+record JobLogRecord(JobId jobId, RunnerAssignment reportedBy, long sequence,
 		Instant observedAt, Stream stream, byte[] content, boolean endOfOutput,
 		boolean truncated, boolean incomplete) {
 

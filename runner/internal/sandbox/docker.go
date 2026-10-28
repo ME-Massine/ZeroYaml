@@ -122,14 +122,15 @@ func checkoutCreateArgs(spec Spec, names resourceNames) []string {
 // jobCreateArgs passes the command as an explicit entrypoint and argument
 // vector. Overriding the entrypoint keeps an image's own ENTRYPOINT from
 // silently wrapping or replacing the dispatched executable.
-func jobCreateArgs(spec Spec, names resourceNames) []string {
+func jobCreateArgs(spec Spec, names resourceNames, captureLogs bool) []string {
 	args := containerCreateArgs(names.job, names, spec.Limits)
+	if captureLogs {
+		// Readable, bounded local logs are required by the Engine follower.
+		args = append(args, "--log-driver", "local", "--log-opt", "max-size=10m",
+			"--log-opt", "max-file=1", "--log-opt", "compress=false")
+	}
 	args = append(
 		args,
-		"--log-driver", "local",
-		"--log-opt", "max-size=10m",
-		"--log-opt", "max-file=1",
-		"--log-opt", "compress=false",
 		"--workdir", spec.WorkingDirectory,
 		"--entrypoint", spec.Command[0],
 		spec.Image,
@@ -141,11 +142,11 @@ func jobCreateArgs(spec Spec, names resourceNames) []string {
 // dockerStreamFunc copies Docker's non-TTY stdout/stderr pipes into bounded
 // writers. Engine frames retain per-stream byte order; observation order cannot
 // reconstruct the command's exact write order across streams.
-type dockerStreamFunc func(context.Context, io.Writer, io.Writer, ...string) error
+type dockerStreamFunc func(context.Context, io.Writer, io.Writer, string) error
 
 func cliDockerStream(dockerBinary string) dockerStreamFunc {
-	return func(ctx context.Context, stdout io.Writer, stderr io.Writer, args ...string) error {
-		if len(args) == 0 {
+	return func(ctx context.Context, stdout io.Writer, stderr io.Writer, containerID string) error {
+		if containerID == "" {
 			return errors.New("Docker container identity is required")
 		}
 		// dial-stdio uses the CLI's configured Docker transport, including named
@@ -172,7 +173,7 @@ func cliDockerStream(dockerBinary string) dockerStreamFunc {
 		}
 		// Keep stdin open while reading: dial-stdio closes the daemon connection
 		// when its input reaches EOF, even if the response is still arriving.
-		if _, err := io.WriteString(request, "GET /containers/"+url.PathEscape(args[len(args)-1])+"/logs?follow=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n"); err != nil {
+		if _, err := io.WriteString(request, "GET /containers/"+url.PathEscape(containerID)+"/logs?follow=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n"); err != nil {
 			cancel()
 			command.Wait()
 			return errors.New("docker output stream failed")

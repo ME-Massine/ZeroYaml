@@ -28,7 +28,7 @@ func TestCLIDockerStreamPreservesStderrBeforeCancellation(t *testing.T) {
 	sink := &logSink{}
 	capture := joblogs.NewCapture(ctx, "job", sink)
 	stderr := cancelAfterWrite{Writer: capture.Writer(joblogs.Stderr), cancel: cancel}
-	err = cliDockerStream(executable)(ctx, io.Discard, stderr, "logs", "--follow", "container")
+	err = cliDockerStream(executable)(ctx, io.Discard, stderr, "container")
 	if err == nil || ctx.Err() != context.Canceled {
 		t.Fatalf("follower error = %v, context = %v", err, ctx.Err())
 	}
@@ -84,6 +84,13 @@ func TestMain(m *testing.M) {
 	<-ctx.Done()
 }
 
+func TestCLIDockerStreamRequiresContainerIdentity(t *testing.T) {
+	// Validation must fail before attempting to start the Docker CLI.
+	if err := cliDockerStream("missing-docker-binary")(context.Background(), io.Discard, io.Discard, ""); err == nil || err.Error() != "Docker container identity is required" {
+		t.Fatalf("empty container identity: %v", err)
+	}
+}
+
 func TestCLIDockerDiagnosticsAreNotJobOutput(t *testing.T) {
 	t.Setenv("ZEROYAML_TEST_LOG_FOLLOWER", "failure")
 	binary, err := os.Executable()
@@ -91,7 +98,7 @@ func TestCLIDockerDiagnosticsAreNotJobOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if err := cliDockerStream(binary)(context.Background(), &stdout, &stderr, "logs", "container"); err == nil {
+	if err := cliDockerStream(binary)(context.Background(), &stdout, &stderr, "container"); err == nil {
 		t.Fatal("expected CLI failure")
 	}
 	if stdout.Len() != 0 || stderr.Len() != 0 {

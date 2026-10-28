@@ -1,9 +1,11 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"slices"
 	"testing"
 	"time"
@@ -13,15 +15,11 @@ import (
 
 type logSink struct {
 	records  []joblogs.Record
-	onAppend func(joblogs.Record)
 	failData bool
 }
 
 func (s *logSink) Append(_ context.Context, r joblogs.Record) error {
 	s.records = append(s.records, r)
-	if s.onAppend != nil {
-		s.onAppend(r)
-	}
 	if s.failData && !r.EndOfOutput {
 		return context.DeadlineExceeded
 	}
@@ -37,10 +35,10 @@ func TestRunCapturesBothStreamsForSucceededAndFailedCommands(t *testing.T) {
 			s := newTestSandbox(docker)
 			s.logs = sink
 			calls := 0
-			s.stream = func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+			s.stream = func(ctx context.Context, stdout, stderr io.Writer, containerID string) error {
 				calls++
-				if !slices.Equal(args, []string{"logs", "--follow", "job-id"}) {
-					t.Fatalf("stream args: %v", args)
+				if containerID != "job-id" {
+					t.Fatalf("stream container: %s", containerID)
 				}
 				stdout.Write([]byte("stdout\n"))
 				stderr.Write([]byte("stderr\n"))
@@ -66,7 +64,7 @@ func TestRunOutputFailureKeepsCommandOutcomeAndMarksIncomplete(t *testing.T) {
 	sink := &logSink{}
 	s := newTestSandbox(docker)
 	s.logs = sink
-	s.stream = func(_ context.Context, stdout, stderr io.Writer, _ ...string) error {
+	s.stream = func(_ context.Context, stdout, stderr io.Writer, _ string) error {
 		stdout.Write([]byte("partial"))
 		return errors.New("stream connection lost")
 	}
@@ -82,7 +80,7 @@ func TestRunStalledLogDeliveryDoesNotConsumeJobDeadline(t *testing.T) {
 	sink := &logSink{failData: true}
 	s := newTestSandbox(docker)
 	s.logs = sink
-	s.stream = func(_ context.Context, stdout, stderr io.Writer, _ ...string) error {
+	s.stream = func(_ context.Context, stdout, stderr io.Writer, _ string) error {
 		_, err := stdout.Write(make([]byte, joblogs.MaxOutputBytes))
 		return err
 	}
@@ -102,6 +100,7 @@ func TestCommandExitWinsWhenLogDeliveryReachesExecutionDeadline(t *testing.T) {
 	docker := newFakeDocker()
 	sink := &logSink{}
 	s := newTestSandbox(docker)
+	s.logs = sink
 	waitFinished := make(chan struct{})
 	originalDocker := s.docker
 	s.docker = func(ctx context.Context, args ...string) (string, error) {
@@ -111,14 +110,14 @@ func TestCommandExitWinsWhenLogDeliveryReachesExecutionDeadline(t *testing.T) {
 		}
 		return output, err
 	}
-	s.stream = func(ctx context.Context, stdout, stderr io.Writer, _ ...string) error {
+	s.stream = func(ctx context.Context, stdout, stderr io.Writer, _ string) error {
 		<-waitFinished
 		cancel()
 		return ctx.Err()
 	}
 	capture := joblogs.NewCapture(runCtx, "job", sink)
 	id := newResourceNames(testExecutionID)
-	code, err := s.runContainer(context.Background(), runCtx, testExecutionID, id.job, jobCreateArgs(testSpec(), id), capture)
+	code, err := s.runContainer(context.Background(), runCtx, testExecutionID, id.job, jobCreateArgs(testSpec(), id, true), capture)
 	if err != nil || code != 0 {
 		t.Fatalf("command exit = %d, %v", code, err)
 	}
@@ -140,7 +139,7 @@ func TestRunCancellationDuringCaptureCleansResourcesAndMarksIncomplete(t *testin
 	sink := &logSink{}
 	s := newTestSandbox(docker)
 	s.logs = sink
-	s.stream = func(streamCtx context.Context, stdout, stderr io.Writer, _ ...string) error {
+	s.stream = func(streamCtx context.Context, stdout, stderr io.Writer, _ string) error {
 		stderr.Write([]byte("failure diagnostics before cancellation"))
 		cancel()
 		<-streamCtx.Done()
@@ -167,7 +166,7 @@ func TestRunTimeoutDuringCaptureCleansResourcesAndMarksIncomplete(t *testing.T) 
 	sink := &logSink{}
 	s := newTestSandbox(docker)
 	s.logs = sink
-	s.stream = func(ctx context.Context, stdout, stderr io.Writer, _ ...string) error {
+	s.stream = func(ctx context.Context, stdout, stderr io.Writer, _ string) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
@@ -178,4 +177,55 @@ func TestRunTimeoutDuringCaptureCleansResourcesAndMarksIncomplete(t *testing.T) 
 		t.Fatalf("result = %+v", result)
 	}
 	docker.assertCleanedUp(t, "checkout-id", "job-id")
+}
+
+type blockingLogSink struct{}
+
+func (blockingLogSink) Append(ctx context.Context, _ joblogs.Record) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestRunBoundsLogCloseAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	docker := newFakeDocker()
+	docker.blockOnWait["job-id"] = true
+	s := newTestSandbox(docker)
+	s.logs = blockingLogSink{}
+	s.logCloseTimeout = 20 * time.Millisecond
+	s.stream = func(streamCtx context.Context, stdout, stderr io.Writer, _ string) error {
+		stderr.Write([]byte("pending diagnostic"))
+		cancel()
+		<-streamCtx.Done()
+		return streamCtx.Err()
+	}
+	result := make(chan Result, 1)
+	go func() { result <- s.Run(ctx, testSpec()) }()
+	select {
+	case got := <-result:
+		if got.Outcome != OutcomeCancelled {
+			t.Fatalf("result = %+v", got)
+		}
+	case <-time.After(s.logCloseTimeout + time.Second):
+		t.Fatal("log close delayed terminal status beyond cancellation bound")
+	}
+	docker.assertCleanedUp(t, "checkout-id", "job-id")
+}
+
+func TestRunWithoutLogDeliveryDoesNotFollowOrWarn(t *testing.T) {
+	docker := newFakeDocker()
+	s := newTestSandbox(docker)
+	var output bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&output, nil))
+	s.stream = func(context.Context, io.Writer, io.Writer, string) error {
+		t.Error("disabled log follower invoked")
+		return errors.New("unsupported")
+	}
+	if result := s.Run(context.Background(), testSpec()); result.Outcome != OutcomeSucceeded {
+		t.Fatalf("result = %+v", result)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("unexpected operational logs: %s", output.String())
+	}
 }

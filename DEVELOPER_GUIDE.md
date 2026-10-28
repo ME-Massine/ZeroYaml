@@ -849,8 +849,13 @@ accepted and stored as incomplete. Restart
 loses all logs. There is no REST/UI log viewer. Raw command bytes are
 excluded from operational logs; arbitrary secrets printed by a command are
 not automatically redacted. Job output is read from Docker Engine frames over
-`docker system dial-stdio`; container stderr streams immediately while Docker
-CLI diagnostics remain separate and are discarded.
+`docker system dial-stdio`; stdout/stderr observations are coalesced into one
+pending 4 KiB buffer, flushed when full, on a stream switch, or at close. Docker
+CLI diagnostics remain separate and are discarded. Enabling delivery overrides
+the daemon default log driver for Job containers with bounded readable `local`
+logs; disabled delivery preserves that default and starts no follower. A cancelled
+dispatch bounds pending flush and final delivery together to one second to reserve
+shutdown time for terminal status reporting.
 An invalid `ZEROYAML_JOB_LOGS_ADDRESS` fails Runner startup.
 See [Runner job logs](./docs/architecture/runner-job-logs.md).
 

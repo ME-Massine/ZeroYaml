@@ -18,7 +18,7 @@ func TestJobCreateArgsPassTheCommandAndWorkingDirectoryExplicitly(t *testing.T) 
 	spec := testSpec()
 	spec.Command = []string{"go", "test", "./...", "-run", "Test; rm -rf /"}
 
-	args := jobCreateArgs(spec, newResourceNames(testExecutionID))
+	args := jobCreateArgs(spec, newResourceNames(testExecutionID), true)
 
 	imageIndex := slices.Index(args, spec.Image)
 	if imageIndex < 0 {

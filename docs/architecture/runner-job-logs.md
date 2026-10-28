@@ -22,7 +22,11 @@ cancelled follower exits. A follower error marks output incomplete without
 copying pipe contents into execution diagnostics.
 
 `runner/internal/joblogs.Capture` serializes pipe observations and emits chunks
-of at most 4096 raw bytes. Partial lines, binary output, and split UTF-8 sequences
+of at most 4096 raw bytes. One pending buffer coalesces writes until full,
+until stdout/stderr switches, or until capture closes. Close flushes pending
+bytes before the final marker using its detached context. Low-volume output
+can therefore remain buffered until a stream switch or end of output.
+Partial lines, binary output, and split UTF-8 sequences
 are preserved. Sequence starts at 1 and increases across both streams.
 `observed_at` is the Runner's UTC observation time. Sequence determines order;
 timestamps may precede Control Plane Job creation because the two hosts have
@@ -63,8 +67,10 @@ no stream, before the dispatcher reports terminal execution status:
 
 Non-zero command exit alone does not make output incomplete. An empty command
 output still has a final marker. Final delivery uses a detached context with
-the same call timeout so cancellation can still be reported; the existing
-process shutdown budget continues to bound the overall drain. Capture state
+the same call timeout so cancellation can still be reported. When dispatch is
+cancelled, the whole close (pending flush and final marker) has a one-second
+bound to reserve shutdown time for terminal status reporting after cleanup.
+The process shutdown budget still bounds the overall drain. Capture state
 locks are never held over network I/O. Closing cancels an active data call,
 waits for its completion under the caller's context, then attempts the final
 marker; marking an output-source error does not wait for delivery.
@@ -74,8 +80,10 @@ marker; marking an output-source error does not wait for delivery.
 Capture sends at most 256 data chunks plus one final marker, keeping only the
 current chunk, an eight-byte frame header, and a fixed 4096-byte frame buffer in
 Runner memory, alongside fixed CLI pipe buffers. The combined
-stdout/stderr byte budget is 1 MiB. Very small writes can exhaust the chunk
-budget first. Docker's Job log driver is explicitly `local`, with `max-size=10m`
+stdout/stderr byte budget is 1 MiB. Frequent stream switches can exhaust the
+chunk budget first; short writes on one stream share a chunk. When delivery is
+enabled, the Runner overrides the daemon default with the `local` Job log driver
+to provide readable, bounded Engine logs, with `max-size=10m`
 and `max-file=1` (compression disabled, as required for a single file); its
 buffer is deleted with the container. A command that emits
 more than that buffer before following starts may lose its earliest bytes;
@@ -92,7 +100,9 @@ terminal status report may still recover Job state. Attribution uses a read-only
 not lock or update the PostgreSQL Job row. Unknown Jobs return
 `NOT_FOUND`; malformed records return `INVALID_ARGUMENT`; wrong assignment,
 sequence conflicts, and post-final records return `FAILED_PRECONDITION`.
-Unexpected storage failures return `INTERNAL`, without exposing storage details.
+Unexpected storage failures return `INTERNAL`, without exposing storage details
+to the caller; the server logs the exception and parsed Job identity at error
+level without logging chunk content.
 Data chunks may skip missing sequence numbers after a delivery failure; a final
 marker following any gap is retained as incomplete, even if the sender reports
 complete delivery: acknowledged chunks may have been evicted locally. The
@@ -134,7 +144,8 @@ listener requires mutual TLS using gRPC transport credentials
 ([gRPC authentication guide](https://grpc.io/docs/guides/auth/)); there is no
 insecure mode. A partial configuration or unreadable/invalid certificate fails
 startup rather than silently downgrading delivery. A Runner with delivery disabled
-still drains command output and reports execution status.
+keeps the daemon default log driver, starts no log follower, and still reports
+execution status.
 
 Provision certificates outside the repository through the deployment's PKI:
 

@@ -68,6 +68,14 @@ The local development environment contains:
 - Redis
 - Kafka
 
+## Runner log configuration
+
+Runner log delivery is disabled by default. Enabling it through the
+`ZEROYAML_JOB_LOGS_*` settings overrides the daemon default log driver for Job
+containers with bounded `local` logging so Engine log following remains readable
+and bounded. Disabled delivery preserves the daemon log driver and starts no
+log follower.
+
 ## Repository structure
 
 ```text
