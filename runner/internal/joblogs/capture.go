@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// Per-Job capture limits are shared with the Control Plane log contract.
 const (
 	MaxChunkBytes  = 4096
 	MaxOutputBytes = 1 << 20

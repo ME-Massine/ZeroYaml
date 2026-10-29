@@ -10,6 +10,7 @@ import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
  * Immutable observation of command bytes or a final output marker. Bytes may
  * contain sensitive user output and must never enter operational logging.
  * Sequence orders observations across both pipes; timestamps are Runner time.
+ * Records are not value-comparable: generated equality compares byte array identities.
  */
 record JobLogRecord(JobId jobId, RunnerAssignment reportedBy, long sequence,
 		Instant observedAt, Stream stream, byte[] content, boolean endOfOutput,

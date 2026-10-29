@@ -102,6 +102,38 @@ class GrpcJobLogServiceTest {
 	}
 
 	@Test
+	void retainedChunksAndFinalMarkerNeedOnlyOneJobLookup() {
+		for (int sequence = 1; sequence <= JobLogRecord.MAX_CHUNKS; sequence++) {
+			client.appendJobLog(request(job, sequence).build());
+		}
+		client.appendJobLog(end(job, JobLogRecord.MAX_CHUNKS + 1).build());
+		verify(jobs).find(job.id());
+		assertEquals(JobLogRecord.MAX_CHUNKS + 1, logs.snapshot(job.id()).size());
+	}
+
+	@Test
+	void retainedStreamStillRejectsAnotherRunnerInstanceWithoutLookup() {
+		client.appendJobLog(request(job, 1).build());
+		assertStatus(Status.Code.FAILED_PRECONDITION,
+				request(job, 2).setInstanceId("another-instance").build());
+		verify(jobs).find(job.id());
+		assertEquals(1, logs.snapshot(job.id()).size());
+	}
+
+	@Test
+	void evictedStreamMustPassAuthoritativeAttributionAgain() {
+		client.appendJobLog(end(job, 1).build());
+		for (int index = 0; index < 32; index++) {
+			client.appendJobLog(request(runningJob(), 1).build());
+		}
+		assertTrue(logs.snapshot(job.id()).isEmpty());
+		assertStatus(Status.Code.FAILED_PRECONDITION,
+				request(job, 2).setInstanceId("another-instance").build());
+		verify(jobs, org.mockito.Mockito.times(2)).find(job.id());
+		assertTrue(logs.snapshot(job.id()).isEmpty());
+	}
+
+	@Test
 	void storageFailuresAreInternalErrorsWithoutStorageDetails() {
 		for (var failure : List.of(new IllegalStateException("private storage detail"),
 				new org.springframework.dao.DataAccessResourceFailureException("private database detail"))) {

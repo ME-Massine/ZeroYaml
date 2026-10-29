@@ -37,10 +37,18 @@ class InMemoryJobLogStore implements JobLogStore {
 	}
 
 	@Override
+	public synchronized boolean appendIfRetained(JobLogRecord record) {
+		if (!logs.containsKey(record.jobId())) {
+			return false;
+		}
+		append(record);
+		return true;
+	}
+
+	@Override
 	public synchronized void append(JobLogRecord record) {
 		var output = logs.get(record.jobId());
-		var existing = output == null ? null : output.records;
-		var previous = existing == null || existing.isEmpty() ? null : existing.getLast();
+		var previous = output == null ? null : output.records.getLast();
 		long expected = previous == null ? 1 : previous.sequence() + 1;
 		if (previous != null && (previous.endOfOutput() || !previous.reportedBy().equals(record.reportedBy()))) {
 			throw new JobLogSequenceException("log is closed or belongs to another Runner process");
@@ -52,18 +60,18 @@ class InMemoryJobLogStore implements JobLogStore {
 		// was acknowledged. The sender cannot detect that loss, so normalize the
 		// retained final marker instead of rejecting its completeness claim.
 		boolean missingChunks = record.sequence() > expected
-				|| (previous != null && previous.sequence() > existing.size());
+				|| (previous != null && previous.sequence() > output.records.size());
 		if (record.endOfOutput() && missingChunks && !record.incomplete()) {
 			record = new JobLogRecord(record.jobId(), record.reportedBy(), record.sequence(),
 					record.observedAt(), record.stream(), record.content(), true, record.truncated(), true);
 		}
-		int bytes = existing == null ? 0 : existing.stream().mapToInt(JobLogRecord::contentSize).sum();
+		int bytes = output == null ? 0 : output.bytes;
 		if (bytes + record.contentSize() > JobLogRecord.MAX_OUTPUT_BYTES) {
 			throw new IllegalArgumentException("log exceeds the per-Job output budget");
 		}
 		// Use local receipt time: Runner timestamps may be skewed or move backwards.
 		var receivedAt = clock.instant();
-		if (existing == null) {
+		if (output == null) {
 			if (logs.size() == MAX_JOBS) {
 				var evictable = logs.entrySet().stream()
 						.filter(entry -> entry.getValue().records.getLast().endOfOutput()
@@ -74,11 +82,11 @@ class InMemoryJobLogStore implements JobLogStore {
 				}
 				logs.remove(evictable.get());
 			}
-			existing = new ArrayList<>();
-			output = new RetainedOutput(existing);
+			output = new RetainedOutput();
 			logs.put(record.jobId(), output);
 		}
-		existing.add(record);
+		output.records.add(record);
+		output.bytes += record.contentSize();
 		output.lastReceivedAt = receivedAt;
 	}
 
@@ -89,11 +97,8 @@ class InMemoryJobLogStore implements JobLogStore {
 	}
 
 	private static final class RetainedOutput {
-		private final List<JobLogRecord> records;
+		private final List<JobLogRecord> records = new ArrayList<>();
+		private int bytes;
 		private Instant lastReceivedAt;
-
-		private RetainedOutput(List<JobLogRecord> records) {
-			this.records = records;
-		}
 	}
 }

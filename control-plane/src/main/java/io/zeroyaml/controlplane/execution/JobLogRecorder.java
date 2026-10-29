@@ -5,8 +5,8 @@ import java.util.Objects;
 import org.springframework.stereotype.Component;
 
 /**
- * Attributes output through a read-only Job lookup. Assignment is immutable
- * once execution starts, so output never needs the status-report write lock.
+ * Attributes new retained streams through a read-only Job lookup. Assignment
+ * is immutable once execution starts; later chunks use the retained identity.
  */
 @Component
 class JobLogRecorder {
@@ -19,6 +19,11 @@ class JobLogRecorder {
 	}
 
 	boolean append(JobLogRecord record) {
+		// The retained check and append are atomic with eviction. No database
+		// lookup or separate attribution cache is needed for a retained stream.
+		if (logs.appendIfRetained(record)) {
+			return true;
+		}
 		return jobs.find(record.jobId()).map(job -> {
 			if (job.runnerAssignment().isEmpty() || !job.runnerAssignment().get().equals(record.reportedBy())) {
 				throw new JobLogAttributionException();

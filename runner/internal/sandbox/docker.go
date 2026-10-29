@@ -175,7 +175,7 @@ func cliDockerStream(dockerBinary string) dockerStreamFunc {
 		// when its input reaches EOF, even if the response is still arriving.
 		if _, err := io.WriteString(request, "GET /containers/"+url.PathEscape(containerID)+"/logs?follow=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n"); err != nil {
 			cancel()
-			command.Wait()
+			_ = command.Wait() // Reap the process; the request write failure is returned below.
 			return errors.New("docker output stream failed")
 		}
 		response, readErr := http.ReadResponse(bufio.NewReader(pipe), nil)

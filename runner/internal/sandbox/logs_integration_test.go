@@ -7,11 +7,102 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/MohamedMBG/ZeroYaml/runner/internal/joblogs"
 )
+
+// TestDockerLogRotationWithBlockedFollower measures daemon-side loss without a
+// capture budget masking it. Gates, rather than sleeps, keep the reader paused
+// while the container exceeds the configured single-file rotation bound.
+func TestDockerLogRotationWithBlockedFollower(t *testing.T) {
+	if os.Getenv(dockerTestsVariable) != "1" {
+		t.Skipf("set %s=1 to start real containers", dockerTestsVariable)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	id, err := newExecutionID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	docker := cliDocker("docker")
+	names := newResourceNames(id)
+	defer func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		if _, err := docker(cleanup, "rm", "--force", names.job); err != nil {
+			t.Errorf("remove rotation test container: %v", err)
+		}
+	}()
+	const generated = 32 << 20
+	if _, err := docker(ctx, "create", "--name", names.job, "--label", managedLabel,
+		"--log-driver", "local", "--log-opt", "max-size=10m", "--log-opt", "max-file=1",
+		"--log-opt", "compress=false", "alpine:3.22", "sh", "-c",
+		"mkfifo /tmp/gate; printf 'start\\n'; read gate < /tmp/gate; head -c 33554432 /dev/zero; printf tail"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := docker(ctx, "start", names.job); err != nil {
+		t.Fatal(err)
+	}
+	writer := &rotationGateWriter{entered: make(chan struct{}), release: make(chan struct{}), ctx: ctx}
+	finished := make(chan struct{})
+	var followErr error
+	go func() {
+		followErr = cliDockerStream("docker")(ctx, writer, io.Discard, names.job)
+		close(finished)
+	}()
+	defer func() {
+		cancel()
+		<-finished
+	}()
+	select {
+	case <-writer.entered:
+	case <-ctx.Done():
+		t.Fatal("follower did not observe initial output")
+	}
+	if _, err := docker(ctx, "exec", names.job, "sh", "-c", "printf 'go\\n' > /tmp/gate"); err != nil {
+		t.Fatal(err)
+	}
+	if code, err := docker(ctx, "wait", names.job); err != nil || code != "0\n" {
+		t.Fatalf("rotation command: code %q, error %v", code, err)
+	}
+	close(writer.release)
+	select {
+	case <-finished:
+		if followErr != nil {
+			t.Fatal(followErr)
+		}
+	case <-ctx.Done():
+		t.Fatal("follower did not finish")
+	}
+	want := int64(generated + len("start\ntail"))
+	if writer.bytes > want {
+		t.Fatalf("observed %d bytes, generated %d", writer.bytes, want)
+	}
+	t.Logf("single-file local rotation: generated=%d observed=%d missing=%d; follower returned no error", want, writer.bytes, want-writer.bytes)
+}
+
+type rotationGateWriter struct {
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+	ctx     context.Context
+	bytes   int64
+}
+
+func (w *rotationGateWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() {
+		close(w.entered)
+		select {
+		case <-w.release:
+		case <-w.ctx.Done():
+		}
+	})
+	w.bytes += int64(len(p))
+	return len(p), nil
+}
 
 // TestDockerExecutionLogCapture exercises the real Job container, CLI pipes,
 // output bounds, and cleanup without needing a source repository or checkout.

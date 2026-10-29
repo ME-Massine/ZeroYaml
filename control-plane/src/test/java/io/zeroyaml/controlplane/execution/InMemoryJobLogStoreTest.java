@@ -24,6 +24,20 @@ class InMemoryJobLogStoreTest {
 	private final InMemoryJobLogStore logs = new InMemoryJobLogStore(clock);
 
 	@Test
+	void retainedAppendNeverAdmitsAnAbsentOrEvictedStream() {
+		when(clock.instant()).thenReturn(NOW);
+		var unknown = JobId.newId();
+		assertFalse(logs.appendIfRetained(record(unknown, 1)));
+		assertTrue(logs.snapshot(unknown).isEmpty());
+		var admitted = fillRetention();
+		assertTrue(logs.appendIfRetained(record(admitted.getFirst(), 2)));
+		when(clock.instant()).thenReturn(NOW.plusSeconds(300));
+		logs.append(record(unknown, 1));
+		assertFalse(logs.appendIfRetained(record(admitted.getFirst(), 3)));
+		assertTrue(logs.snapshot(admitted.getFirst()).isEmpty());
+	}
+
+	@Test
 	void recoversAllAbandonedSlotsAtTheIdleBoundaryWithoutFinalMarkers() {
 		var abandoned = fillRetention();
 		var incoming = JobId.newId();
