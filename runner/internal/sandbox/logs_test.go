@@ -216,6 +216,38 @@ func TestRunBoundsLogCloseAfterCancellation(t *testing.T) {
 	docker.assertCleanedUp(t, "checkout-id", "job-id")
 }
 
+func TestRunBoundsLogCloseWithoutCancellation(t *testing.T) {
+	for name, timeout := range map[string]time.Duration{"completed": time.Minute, "timed out": 20 * time.Millisecond} {
+		t.Run(name, func(t *testing.T) {
+			docker := newFakeDocker()
+			docker.blockOnWait["job-id"] = name == "timed out"
+			s := newTestSandbox(docker)
+			s.logs = blockingLogSink{}
+			s.logFinalTimeout = 20 * time.Millisecond
+			s.logCloseTimeout = time.Hour
+			s.stream = func(_ context.Context, stdout, stderr io.Writer, _ string) error {
+				stdout.Write([]byte("pending output"))
+				stderr.Write([]byte("pending diagnostic"))
+				return nil
+			}
+			spec := testSpec()
+			spec.Timeout = timeout
+			result := make(chan Result, 1)
+			go func() { result <- s.Run(context.Background(), spec) }()
+			select {
+			case got := <-result:
+				if got.Outcome == OutcomeCancelled {
+					t.Fatalf("result = %+v", got)
+				}
+			case <-time.After(5 * time.Second):
+				// The blocking sink never answers, so only the close bound ends Run.
+				t.Fatal("log close delayed terminal status beyond its bound")
+			}
+			docker.assertCleanedUp(t, "checkout-id", "job-id")
+		})
+	}
+}
+
 // slowLogSink acknowledges every record after a delay, like a healthy but
 // slow ingress.
 type slowLogSink struct {

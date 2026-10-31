@@ -25,7 +25,8 @@ const (
 const maxPendingAge = time.Minute
 
 // maxConsecutiveFailures pauses data delivery once the ingress has failed this
-// many chunks in a row. Any acknowledgment resets the count.
+// many chunks in a row. Any acknowledgment resets the count; a send cancelled
+// by the capture's own context is not an ingress failure.
 const maxConsecutiveFailures = 2
 
 // deliveryCooldown is how long data delivery stays paused after
@@ -68,10 +69,10 @@ type Sink interface {
 
 // Capture serializes stdout and stderr observations with bounded memory and
 // no background queue. Slow delivery applies backpressure to the Docker CLI.
-// Failed chunks are not retried. After two consecutive failures, delivery pauses
-// for deliveryCooldown and then probes with the next chunk, so a stalled ingress
-// cannot consume the Job deadline one chunk at a time and a recovered one is
-// used again.
+// Failed chunks are not retried. After two consecutive ingress failures,
+// delivery pauses for deliveryCooldown and then probes with the next chunk, so
+// a stalled ingress cannot consume the Job deadline one chunk at a time and a
+// recovered one is used again. Sends cancelled locally do not count.
 //
 // Each stream coalesces writes into its own pending chunk, which is sent when
 // full, when a write arrives after it has waited maxPendingAge, or on Close.
@@ -134,18 +135,10 @@ func (w streamWriter) Write(p []byte) (int, error) {
 	case <-c.delivery:
 		defer func() { c.delivery <- struct{}{} }()
 	case <-c.ctx.Done():
-		c.mu.Lock()
-		c.incomplete = true
-		c.truncated = c.truncated || n > 0
-		c.mu.Unlock()
-		return n, nil
+		return c.drainStopped(n)
 	}
 	if c.ctx.Err() != nil {
-		c.mu.Lock()
-		c.incomplete = true
-		c.truncated = c.truncated || n > 0
-		c.mu.Unlock()
-		return n, nil
+		return c.drainStopped(n)
 	}
 	c.flushAged(c.ctx)
 	pending := &c.pending[w.stream-1]
@@ -182,6 +175,16 @@ func (w streamWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// drainStopped accepts n bytes written after delivery stopped without retaining
+// them, so the command can still finish.
+func (c *Capture) drainStopped(n int) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.incomplete = true
+	c.truncated = c.truncated || n > 0
+	return n, nil
+}
+
 // flushAged sends every pending chunk that has waited maxPendingAge, oldest
 // first. It requires the delivery token.
 func (c *Capture) flushAged(ctx context.Context) {
@@ -212,6 +215,12 @@ func (c *Capture) pendingByAge() []Stream {
 // During a delivery cooldown, the chunk is dropped without a network call and
 // the output is marked truncated. Sequence numbers are assigned only to sent
 // chunks, so they stay contiguous across drops.
+//
+// A send that fails because ctx itself ended, through StopDelivery, the drain
+// bound, or the Job deadline, is lost but does not count as an ingress
+// failure: it says nothing about the ingress, and counting it could start a
+// cooldown that makes Close drop its pending chunks unsent. A timeout inside
+// the Sink's own per-call deadline leaves ctx intact and still counts.
 func (c *Capture) flush(ctx context.Context, stream Stream) {
 	pending := &c.pending[stream-1]
 	if len(pending.content) == 0 {
@@ -236,9 +245,12 @@ func (c *Capture) flush(ctx context.Context, stream Stream) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err != nil {
-		c.consecutiveFailures++
 		c.incomplete = true
 		c.truncated = true
+		if ctx.Err() != nil {
+			return
+		}
+		c.consecutiveFailures++
 		if c.consecutiveFailures >= maxConsecutiveFailures {
 			c.retryAfter = c.now().Add(deliveryCooldown)
 		}

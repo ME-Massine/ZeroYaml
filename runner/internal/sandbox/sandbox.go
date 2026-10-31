@@ -48,6 +48,15 @@ const (
 	defaultLogDrainPerChunk = 100 * time.Millisecond
 )
 
+// defaultLogFinalTimeout bounds the final log flush when the execution was not
+// cancelled, including after a timeout. Close sends at most the two pending
+// chunks and the final marker. Without its own bound each send would only be
+// limited by the Sink's per-call timeout, so a slow ingress could delay the
+// terminal status report by three call timeouts while the Job keeps its
+// concurrency slot. The bound adds to the drain bound: output delivery after
+// command exit takes at most 35.6 + 5 = 40.6 seconds.
+const defaultLogFinalTimeout = 5 * time.Second
+
 // maxLogCloseTimeout caps the final log flush after a cancellation. The bound is
 // also limited to a fifth of the Runner shutdown budget, so the log close never
 // consumes the time reserved for container cleanup and the terminal status
@@ -104,6 +113,8 @@ type Sandbox struct {
 	logs            joblogs.Sink
 	newID           func() (string, error)
 	cleanupTimeout  time.Duration
+	logFinalTimeout time.Duration
+	// logCloseTimeout replaces logFinalTimeout after a cancellation.
 	logCloseTimeout time.Duration
 	logDrainTimeout time.Duration
 	// logDrainPerChunk extends logDrainTimeout for each chunk still permitted.
@@ -137,6 +148,7 @@ func newSandbox(
 		docker:           docker,
 		newID:            newID,
 		cleanupTimeout:   cleanupTimeout,
+		logFinalTimeout:  defaultLogFinalTimeout,
 		logCloseTimeout:  maxLogCloseTimeout,
 		logDrainTimeout:  defaultLogDrainTimeout,
 		logDrainPerChunk: defaultLogDrainPerChunk,
@@ -156,12 +168,15 @@ func (s *Sandbox) Run(ctx context.Context, spec Spec) Result {
 	capture := joblogs.NewCapture(runCtx, spec.JobID, s.logs)
 	interrupted := false
 	defer func() {
-		closeCtx := context.WithoutCancel(ctx)
+		// The close is detached from a cancelled execution but always bounded;
+		// after a cancellation the shorter shutdown-derived bound protects
+		// cleanup and the terminal status report.
+		closeTimeout := s.logFinalTimeout
 		if ctx.Err() != nil {
-			var closeCancel context.CancelFunc
-			closeCtx, closeCancel = context.WithTimeout(closeCtx, s.logCloseTimeout)
-			defer closeCancel()
+			closeTimeout = s.logCloseTimeout
 		}
+		closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+		defer closeCancel()
 		if err := capture.Close(closeCtx, interrupted); err != nil {
 			s.logger.WarnContext(ctx, "job output final marker was not acknowledged")
 		}

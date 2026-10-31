@@ -66,7 +66,11 @@ failure pauses delivery again. A stalled ingress therefore costs at most one
 deadline-bounded call per 30 seconds instead of consuming the execution
 deadline one chunk at a time, while a transient refusal, such as
 `RESOURCE_EXHAUSTED` during a retention burst or a short network interruption,
-loses only the output of one pause. Sequence numbers are assigned only to sent
+loses only the output of one pause. A send cancelled by the Runner itself (the
+drain bound, a Job timeout, or a cancellation) is lost but not counted as a
+failure, because it says nothing about the ingress; otherwise it could start a
+pause that drops the pending chunks Close is meant to send. A call that exceeds
+its own deadline still counts. Sequence numbers are assigned only to sent
 chunks, so drops leave no sequence gaps. The final marker is always attempted.
 Once the command has exited, the follower gets a drain bound of ten seconds plus
 100 ms for every data chunk the capture budget still permits, at most 35.6
@@ -98,11 +102,15 @@ no stream, before the dispatcher reports terminal execution status:
 | No final marker | Output completeness is unknown; the Runner or transport may have stopped. |
 
 Non-zero command exit alone does not make output incomplete. An empty command
-output still has a final marker. Final delivery uses a detached context with
-the same call timeout so cancellation can still be reported. When dispatch is
-cancelled, the whole close (pending flush and final marker) is bounded by one
-second or a fifth of `ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT`, whichever is shorter,
-to reserve shutdown time for terminal status reporting after cleanup.
+output still has a final marker. Final delivery uses a detached context, so
+cancellation can still be reported, and every call keeps its own timeout. The
+whole close (at most the two pending chunks and the final marker) has one
+overall bound of five seconds, including after a Job timeout; without it, a slow
+ingress could delay the terminal status report by three call timeouts. Output
+delivery after command exit therefore takes at most 35.6 + 5 = 40.6 seconds.
+When dispatch is cancelled, the close is instead bounded by one second or a
+fifth of `ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT`, whichever is shorter, to reserve
+shutdown time for terminal status reporting after cleanup.
 The process shutdown budget still bounds the overall drain. Capture state
 locks are never held over network I/O. Closing cancels an active data call,
 waits for its completion under the caller's context, then attempts the final
@@ -197,9 +205,12 @@ search, and a browser viewer are outside this change.
 `GET /api/v1/jobs/{jobId}/logs` returns the retained output of one Job through
 `JobLogStore.snapshot`. It is disabled until `zeroyaml.job-logs.read.token`
 (`ZEROYAML_JOB_LOGS_READ_TOKEN`) is set to a token of at least 32 characters;
-while disabled, every request answers `404`, like an absent endpoint. Logs can
+while it is unset or empty, every request answers `404`, like an absent
+endpoint. A token that is only whitespace, or that has surrounding whitespace,
+fails startup instead, because it usually means a secret rendered empty. Logs can
 contain secrets printed by user commands, so reading always requires
-`Authorization: Bearer <token>`. The token check runs before the Job identity is
+`Authorization: Bearer <token>`. The scheme name is case-insensitive
+(RFC 7235); the token is not. The token check runs before the Job identity is
 parsed and compares SHA-256 digests in constant time. One shared token is the
 smallest viable control while the Control Plane has no user authentication;
 anyone holding it can read every retained log, so store and rotate it like the
@@ -264,6 +275,15 @@ Provision certificates outside the repository through the deployment's PKI:
   Rotate certificates by provisioning replacement files and restarting the service.
   Changes to registration/status authentication remain outside this log-ingress fix.
 
+Known gap until dispatch binds the assignment (#30): the assignment that log
+attribution checks is set by the plaintext, unauthenticated `ReportJobStatus`
+RPC. Any holder of a valid Runner certificate can report `RUNNING` for another
+`QUEUED` Job under its own Runner ID, then write that Job's log, which the read
+endpoint serves as genuine, or occupy its retention slot so the real Runner's
+chunks are refused with `FAILED_PRECONDITION`. A stricter certificate check on
+the log listener alone cannot close this. The status RPC must be authenticated,
+or the log writer must be checked against the dispatch record.
+
 | Service | Setting | Purpose |
 | --- | --- | --- |
 | Control Plane | `zeroyaml.job-logs.port` / `ZEROYAML_JOBLOGS_PORT` | Dedicated log port, for example 50053; no default. |
@@ -274,7 +294,7 @@ Provision certificates outside the repository through the deployment's PKI:
 | Runner | `ZEROYAML_JOB_LOGS_CERTIFICATE` | PEM Runner client certificate chain path. |
 | Runner | `ZEROYAML_JOB_LOGS_PRIVATE_KEY` | PEM Runner private key path. |
 | Runner | `ZEROYAML_JOB_LOGS_CA` | PEM CA bundle for server verification. |
-| Control Plane | `zeroyaml.job-logs.read.token` / `ZEROYAML_JOB_LOGS_READ_TOKEN` | Bearer token for the read endpoint, at least 32 characters; unset disables reading. |
+| Control Plane | `zeroyaml.job-logs.read.token` / `ZEROYAML_JOB_LOGS_READ_TOKEN` | Bearer token for the read endpoint, at least 32 characters; unset or empty disables reading, whitespace fails startup. |
 
 The server limits incoming log messages to 8192 bytes (including metadata fields
 in the protobuf record) and TLS handshakes to five seconds. Calls run on a fixed
@@ -283,9 +303,21 @@ retention lock and the Job lookup serialize most work, so more threads would
 only wait. At most 64 calls run at once, twice the 32 retained Jobs, because each
 Runner sends one call at a time per Job. Further calls are answered
 `RESOURCE_EXHAUSTED` immediately, before the certificate identity check, and the Runner treats
-them like any other lost chunk. The work queue is bounded at 512 tasks, above
-what 64 calls can schedule. The Runner-facing registration/status server still
-uses the default executor; bounding it is separate work. Invalid or missing
+them like any other lost chunk. One connection may open at most 8 concurrent
+streams; a Runner's further calls wait on its side under HTTP/2 flow control.
+The call limit itself runs on the pool, so a refused call still takes a queue
+slot for its start task. grpc-java serializes each call's events into at most
+one queued task, plus one cancellation task when the call fails. The work queue
+of 512 tasks therefore holds two tasks for each of the 64 admitted calls plus
+the start tasks of 48 connections at their stream cap. A task beyond that is
+rejected: grpc-java discards it and resets the stream instead of delivering
+`UNAVAILABLE`, so the call never sees its close or cancel events. The call
+limit therefore also releases each permit when the transport closes the
+stream, through a stream tracer that does not depend on the pool, and a
+rejected task cannot leak a permit. A caller-runs policy is deliberately not
+used, because the caller is the Netty event loop. The Runner-facing
+registration/status server still uses the default executor; bounding it is
+tracked by #280. Invalid or missing
 client credentials fail the handshake. A verified certificate without the Runner
 URI SAN returns `UNAUTHENTICATED`; a different authenticated Runner ID returns
 `PERMISSION_DENIED`, without retaining content. Payload validation and assignment
@@ -297,14 +329,18 @@ The normal Runner suite covers both streams, raw bytes, deterministic sequence
 context, concurrent writes, empty output, large output, interleaved line output
 within the chunk budget, the chunk-count limit, failed execution, cancellation,
 capture errors, failure-count reset, the delivery cooldown and its recovery
-probe, deadline stops without a capture warning, gRPC
+probe, locally cancelled sends that do not start a cooldown, deadline stops
+without a capture warning, gRPC
 deadlines, age-based flushing of slow output, the budget-scaled drain bound
-after command exit, the shutdown-derived close bound, and payload exclusion
+after command exit, the close bound on completed, timed-out, and cancelled
+executions, log endpoint validation at configuration load, and payload exclusion
 from operational logs. Control Plane transport tests cover byte
 fidelity, assignment validation, sequence rules, timestamp and payload bounds,
 the 1 MiB limit, completed-output and idle-stream eviction, active-retention
 saturation without a Job lookup, shared protocol and timestamp validation, the
-concurrent call limit and permit release, the authenticated read endpoint,
+concurrent call limit and permit release, including after executor rejection,
+the authenticated read endpoint with case-insensitive scheme matching and
+whitespace-token refusal,
 immutable snapshots, retained output of failed Jobs, and refused admission for
 terminal Jobs, including after a finished stream was evicted. Regression tests also cover independent
 host clocks, sequence gaps after loss, cancellation of blocked delivery,

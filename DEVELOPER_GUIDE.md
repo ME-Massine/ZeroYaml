@@ -848,29 +848,33 @@ active output refuses new Jobs' logs. Final markers after retention loss are
 accepted and stored as incomplete; records that would open a new stream for a
 terminal Job are refused. Restart
 loses all logs. `GET /api/v1/jobs/{jobId}/logs` reads retained output; it answers
-`404` until `ZEROYAML_JOB_LOGS_READ_TOKEN` holds a bearer token of at least 32
-characters, and every read needs `Authorization: Bearer <token>`. There is no UI
+`404` while `ZEROYAML_JOB_LOGS_READ_TOKEN` is unset or empty, a whitespace-only
+token fails startup, and every read needs `Authorization: Bearer <token>` of at
+least 32 characters (the scheme name is case-insensitive). There is no UI
 log viewer. Log ingress runs on 8 fixed worker threads with at most 64
-concurrent calls. Raw command bytes are
+concurrent calls and 8 concurrent streams per connection. Raw command bytes are
 excluded from operational logs; arbitrary secrets printed by a command are
 not automatically redacted. Job output is read from Docker Engine frames over
 `docker system dial-stdio`; stdout and stderr observations are coalesced into one
 pending 4 KiB buffer per stream, flushed when full, on a write after the pending
 bytes have waited one minute, or at close. A stream switch does not flush, so
 interleaved line output cannot exhaust the chunk budget; cross-stream order is
-kept at chunk granularity. After two consecutive failures, data delivery
+kept at chunk granularity. After two consecutive ingress failures, data delivery
 pauses for 30 seconds and then probes with the next chunk; an acknowledged
-chunk resets the count. Docker
+chunk resets the count, and sends cancelled by the Runner itself do not count. Docker
 CLI diagnostics remain separate and are discarded. Enabling delivery overrides
 the daemon default log driver for Job containers with bounded readable `local`
 logs; disabled delivery preserves that default and starts no follower. After the
 command exits, log delivery has ten seconds plus 100 ms per chunk still allowed
 by the capture budget (at most 35.6 seconds) to drain before the remaining
 output is marked incomplete, so slow delivery cannot hold the container or the
-terminal status report. A cancelled dispatch bounds pending flush and final delivery
-together to one second, or a fifth of `ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT` if that
-is shorter, to reserve shutdown time for terminal status reporting.
-An invalid `ZEROYAML_JOB_LOGS_ADDRESS` fails Runner startup.
+terminal status report. The pending flush and final marker then share one
+five-second bound, so delivery after command exit takes at most 40.6 seconds. A
+cancelled dispatch bounds them together to one second, or a fifth of
+`ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT` if that is shorter, to reserve shutdown time
+for terminal status reporting.
+A partial `ZEROYAML_JOB_LOGS_*` configuration or an invalid
+`ZEROYAML_JOB_LOGS_ADDRESS` fails Runner configuration loading at startup.
 See [Runner job logs](./docs/architecture/runner-job-logs.md).
 
 `runner/internal/sandbox` runs every accepted Job in Docker; the Runner never

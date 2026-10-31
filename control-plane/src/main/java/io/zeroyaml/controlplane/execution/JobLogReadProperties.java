@@ -5,9 +5,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
  * Bearer token that authorizes reading retained Job logs. Reading is disabled
- * while the token is unset, because logs can contain secrets printed by user
- * commands. Supply it through {@code ZEROYAML_JOB_LOGS_READ_TOKEN} or an
- * approved secret store; it has no default and is never logged.
+ * while the token is unset or empty, because logs can contain secrets printed by
+ * user commands. Supply it through {@code ZEROYAML_JOB_LOGS_READ_TOKEN} or an
+ * approved secret store; it has no default and is never logged. A value of only
+ * whitespace fails startup instead of disabling reading, because it usually
+ * means a secret rendered empty.
  */
 @ConfigurationProperties(prefix = "zeroyaml.job-logs.read")
 record JobLogReadProperties(String token) {
@@ -15,7 +17,7 @@ record JobLogReadProperties(String token) {
 	/** Shortest accepted token; rules out short, guessable values. */
 	static final int MINIMUM_TOKEN_LENGTH = 32;
 
-	boolean enabled() { return token != null && !token.isBlank(); }
+	boolean enabled() { return token != null && !token.isEmpty(); }
 
 	@PostConstruct
 	void validate() {

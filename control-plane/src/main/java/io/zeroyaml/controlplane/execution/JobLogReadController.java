@@ -79,7 +79,8 @@ class JobLogReadController {
 	}
 
 	private boolean authorized(String authorization) {
-		if (authorization == null || !authorization.startsWith(BEARER_PREFIX)) {
+		// Authentication schemes are case-insensitive (RFC 7235, section 2.1); the token is not.
+		if (authorization == null || !authorization.regionMatches(true, 0, BEARER_PREFIX, 0, BEARER_PREFIX.length())) {
 			return false;
 		}
 		return MessageDigest.isEqual(tokenDigest, sha256(authorization.substring(BEARER_PREFIX.length())));

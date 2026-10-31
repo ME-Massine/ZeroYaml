@@ -6,10 +6,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	runnerv1 "github.com/MohamedMBG/ZeroYaml/runner/gen/runner/v1"
@@ -39,21 +36,12 @@ type Reporter struct {
 }
 
 // NewReporter configures mTLS without an insecure fallback. A wholly empty
-// endpoint disables delivery; partial or invalid TLS configuration fails startup.
+// endpoint disables delivery. The endpoint's completeness and address are
+// validated by runnerconfig.Load; unreadable or invalid TLS material fails here,
+// at startup.
 func NewReporter(endpoint Endpoint, identity runneridentity.Identity, timeout time.Duration, logger *slog.Logger) (*Reporter, error) {
 	if endpoint == (Endpoint{}) {
 		return nil, nil
-	}
-	if endpoint.Address == "" || endpoint.Certificate == "" || endpoint.PrivateKey == "" || endpoint.CA == "" {
-		return nil, fmt.Errorf("job logs require ZEROYAML_JOB_LOGS_ADDRESS, CERTIFICATE, PRIVATE_KEY, and CA")
-	}
-	host, port, err := net.SplitHostPort(endpoint.Address)
-	if err != nil || host == "" || strings.Contains(host, "/") {
-		return nil, fmt.Errorf("ZEROYAML_JOB_LOGS_ADDRESS must be a TCP address in host:port form")
-	}
-	portNumber, err := strconv.Atoi(port)
-	if err != nil || portNumber < 1 || portNumber > 65535 {
-		return nil, fmt.Errorf("ZEROYAML_JOB_LOGS_ADDRESS must use a numeric port between 1 and 65535")
 	}
 	certificate, err := tls.LoadX509KeyPair(endpoint.Certificate, endpoint.PrivateKey)
 	if err != nil {

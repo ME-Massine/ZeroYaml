@@ -11,10 +11,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
-import io.grpc.Grpc;
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
 import io.grpc.TlsServerCredentials;
+import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 
 /**
  * Owns the optional mTLS log listener, isolated from the legacy Runner transport.
@@ -24,14 +24,33 @@ import io.grpc.TlsServerCredentials;
  * threads would only wait. Each Runner sends one call at a time per Job and
  * retention holds at most 32 Jobs, so {@value #MAX_CONCURRENT_CALLS} concurrent
  * calls leave headroom; {@link JobLogCallLimit} refuses the rest with
- * {@code RESOURCE_EXHAUSTED}. The work queue is bounded well above the tasks
- * those calls can schedule; a task beyond it is rejected rather than queued.</p>
+ * {@code RESOURCE_EXHAUSTED}.</p>
+ *
+ * <p>The call limit runs on the executor, so a refused call still takes a queue
+ * slot for its start task. grpc-java serializes each call's events into at most
+ * one queued task, plus one context-cancellation task when the call fails, so an
+ * admitted call holds at most two slots. The queue holds those of every admitted
+ * call, 2 &times; {@value #MAX_CONCURRENT_CALLS}, plus the start tasks of 48
+ * connections at their {@value #MAX_CALLS_PER_CONNECTION}-stream cap; every
+ * connection needs a valid Runner certificate. A task beyond the queue is
+ * rejected, which resets that stream instead of queueing it. The rejected
+ * events never reach the call, so {@link JobLogCallLimit#streamTracerFactory()}
+ * releases the permit when the transport closes the stream. Do not replace the
+ * rejection with a caller-runs policy: the caller is the Netty event loop, and
+ * a Job lookup there would stall every connection on that loop.</p>
  */
 @Component
 class JobLogGrpcServer implements SmartLifecycle {
 	static final int WORKER_THREADS = 8;
 	static final int MAX_CONCURRENT_CALLS = 64;
-	private static final int MAX_QUEUED_TASKS = MAX_CONCURRENT_CALLS * 8;
+	/**
+	 * Concurrent streams one connection may open. A Runner sends one call at a
+	 * time per Job and runs at most 16 Jobs, but its default is one; 8 covers a
+	 * typical Runner and stops a single connection from filling the queue.
+	 * Streams beyond it wait on the client side under HTTP/2 flow control.
+	 */
+	static final int MAX_CALLS_PER_CONNECTION = 8;
+	private static final int MAX_QUEUED_TASKS = 2 * MAX_CONCURRENT_CALLS + 48 * MAX_CALLS_PER_CONNECTION;
 	private final JobLogServerProperties properties;
 	private final JobLogRecorder recorder;
 	private Server server;
@@ -53,13 +72,16 @@ class JobLogGrpcServer implements SmartLifecycle {
 					.keyManager(properties.certificate().toFile(), properties.privateKey().toFile())
 					.trustManager(properties.clientCa().toFile())
 					.clientAuth(TlsServerCredentials.ClientAuth.REQUIRE).build();
+			var callLimit = new JobLogCallLimit(MAX_CONCURRENT_CALLS);
 			// The last interceptor runs first: the call limit applies before authentication work.
-			server = Grpc.newServerBuilderForPort(properties.port(), credentials)
+			server = NettyServerBuilder.forPort(properties.port(), credentials)
 					.executor(executor)
+					.maxConcurrentCallsPerConnection(MAX_CALLS_PER_CONNECTION)
 					.maxInboundMessageSize(8192)
 					.handshakeTimeout(5, TimeUnit.SECONDS)
+					.addStreamTracerFactory(callLimit.streamTracerFactory())
 					.addService(ServerInterceptors.intercept(new GrpcJobLogService(recorder),
-							new JobLogAuthentication(), new JobLogCallLimit(MAX_CONCURRENT_CALLS)))
+							new JobLogAuthentication(), callLimit))
 					.build().start();
 		} catch (IOException | RuntimeException exception) {
 			executor.shutdownNow();

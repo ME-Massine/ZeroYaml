@@ -240,7 +240,37 @@ func (c Config) Validate() error {
 		return fmt.Errorf("%s must be greater than zero, got %s", envHeartbeatTimeout, c.HeartbeatTimeout)
 	}
 
+	if err := c.validateJobLogs(); err != nil {
+		return err
+	}
+
 	return c.validateExecution()
+}
+
+// validateJobLogs accepts either no log delivery configuration or all four
+// values, so a partial setup never silently disables delivery. The address is
+// a dial target, so unlike a listen address it must name a host. The TLS files
+// are read, and checked, when the Reporter is created.
+func (c Config) validateJobLogs() error {
+	logs := c.JobLogs
+	if logs == (joblogs.Endpoint{}) {
+		return nil
+	}
+
+	if logs.Address == "" || logs.Certificate == "" || logs.PrivateKey == "" || logs.CA == "" {
+		return fmt.Errorf("job log delivery requires %s, %s, %s, and %s together; leave all four unset to disable it",
+			envJobLogsAddress, envJobLogsCertificate, envJobLogsPrivateKey, envJobLogsCA)
+	}
+
+	if err := validateTCPAddress(logs.Address); err != nil {
+		return fmt.Errorf("%s must be a TCP address in host:port form, such as localhost:50053: %w", envJobLogsAddress, err)
+	}
+
+	if host, _, _ := net.SplitHostPort(logs.Address); host == "" {
+		return fmt.Errorf("%s must name a host, such as localhost:50053", envJobLogsAddress)
+	}
+
+	return nil
 }
 
 func (c Config) validateExecution() error {

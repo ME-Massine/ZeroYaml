@@ -397,3 +397,41 @@ func TestLoadReadsOptionalJobLogTLSConfiguration(t *testing.T) {
 		t.Fatal("log TLS configuration was not loaded")
 	}
 }
+
+func TestLoadRejectsPartialJobLogConfiguration(t *testing.T) {
+	names := []string{envJobLogsAddress, envJobLogsCertificate, envJobLogsPrivateKey, envJobLogsCA}
+	for _, set := range names {
+		t.Run(set, func(t *testing.T) {
+			for _, name := range names {
+				unsetForTest(t, name)
+			}
+			t.Setenv(set, "configured")
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected only %s to fail", set)
+			}
+			for _, name := range names {
+				if !strings.Contains(err.Error(), name) {
+					t.Errorf("expected the error to name %s, got %q", name, err.Error())
+				}
+			}
+		})
+	}
+}
+
+func TestLoadRejectsMalformedJobLogAddress(t *testing.T) {
+	for _, address := range []string{"localhost", ":50053", "localhost:http", "localhost:0", "localhost:70000", "https://localhost:50053"} {
+		t.Run(address, func(t *testing.T) {
+			t.Setenv(envJobLogsAddress, address)
+			t.Setenv(envJobLogsCertificate, "runner.pem")
+			t.Setenv(envJobLogsPrivateKey, "runner-key.pem")
+			t.Setenv(envJobLogsCA, "ca.pem")
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), envJobLogsAddress) {
+				t.Fatalf("address %q: expected startup validation error, got %v", address, err)
+			}
+		})
+	}
+}

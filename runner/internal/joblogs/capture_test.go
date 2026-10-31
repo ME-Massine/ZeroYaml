@@ -344,6 +344,35 @@ func TestCaptureResumesDeliveryAfterCooldown(t *testing.T) {
 	}
 }
 
+func TestLocallyCancelledSendDoesNotStartCooldown(t *testing.T) {
+	var capture *Capture
+	var records []Record
+	capture = NewCapture(context.Background(), "stopped-after-failure", sinkFunc(func(ctx context.Context, record Record) error {
+		records = append(records, record)
+		switch record.Sequence {
+		case 1:
+			return errors.New("ingress timed out")
+		case 2:
+			// The drain bound stops delivery while this chunk is in flight.
+			capture.StopDelivery()
+			return ctx.Err()
+		}
+		return nil
+	}))
+	capture.Writer(Stdout).Write(make([]byte, MaxChunkBytes))
+	capture.Writer(Stderr).Write([]byte("BUILD FAILURE"))
+	capture.Writer(Stdout).Write(make([]byte, MaxChunkBytes))
+	if err := capture.Close(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 4 || records[2].Stream != Stderr || string(records[2].Content) != "BUILD FAILURE" {
+		t.Fatalf("pending chunk was not sent after a local cancellation: %+v", records)
+	}
+	if final := records[3]; !final.EndOfOutput || !final.Incomplete || !final.Truncated {
+		t.Fatalf("final = %+v", final)
+	}
+}
+
 func TestPersistentFailureCostsOneCallPerCooldown(t *testing.T) {
 	calls := 0
 	capture := NewCapture(context.Background(), "down", sinkFunc(func(_ context.Context, record Record) error {

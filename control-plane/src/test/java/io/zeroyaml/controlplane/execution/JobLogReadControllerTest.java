@@ -82,7 +82,7 @@ class JobLogReadControllerTest {
 		var job = JobId.newId();
 		logs.append(chunk(job, 1, JobLogRecord.Stream.STDOUT, "secret".getBytes(StandardCharsets.UTF_8)));
 		for (var authorization : new String[] { null, TOKEN, "Basic " + TOKEN, "Bearer ", "Bearer " + TOKEN + "x",
-				"Bearer " + TOKEN.substring(1), "bearer " + TOKEN }) {
+				"Bearer " + TOKEN.substring(1), "Bearer " + TOKEN.toUpperCase(), "Bearer" + TOKEN, "Bearer  " + TOKEN }) {
 			var request = get(JobLogReadController.PATH, "not-a-job-id");
 			if (authorization != null) {
 				request.header(HttpHeaders.AUTHORIZATION, authorization);
@@ -90,6 +90,16 @@ class JobLogReadControllerTest {
 			mockMvc.perform(request)
 					.andExpect(status().isUnauthorized())
 					.andExpect(header().string(HttpHeaders.WWW_AUTHENTICATE, "Bearer"));
+		}
+	}
+
+	@Test
+	void matchesTheBearerSchemeCaseInsensitively() throws Exception {
+		var job = JobId.newId();
+		logs.append(chunk(job, 1, JobLogRecord.Stream.STDOUT, new byte[] { 'x' }));
+		for (var scheme : new String[] { "bearer ", "BEARER ", "bEaReR " }) {
+			mockMvc.perform(get(JobLogReadController.PATH, job.value()).header(HttpHeaders.AUTHORIZATION, scheme + TOKEN))
+					.andExpect(status().isOk());
 		}
 	}
 
@@ -106,7 +116,7 @@ class JobLogReadControllerTest {
 		var logs = new InMemoryJobLogStore();
 		var job = JobId.newId();
 		logs.append(chunk(job, 1, JobLogRecord.Stream.STDOUT, new byte[] { 'x' }));
-		for (var token : new String[] { null, "", "   " }) {
+		for (var token : new String[] { null, "" }) {
 			var disabled = new JobLogReadController(logs, new JobLogReadProperties(token));
 			assertEquals(HttpStatus.NOT_FOUND, disabled.read(job.value().toString(), "Bearer " + TOKEN).getStatusCode());
 		}
@@ -121,6 +131,15 @@ class JobLogReadControllerTest {
 		assertThrows(IllegalStateException.class, () -> new JobLogReadProperties("short-token").validate());
 		var whitespace = assertThrows(IllegalStateException.class, () -> new JobLogReadProperties(" " + TOKEN).validate());
 		assertFalse(whitespace.getMessage().contains(TOKEN));
+	}
+
+	@Test
+	void refusesAWhitespaceOnlyTokenInsteadOfDisablingTheReader() {
+		for (var blank : new String[] { "   ", " ".repeat(JobLogReadProperties.MINIMUM_TOKEN_LENGTH), "\t\n" }) {
+			assertTrue(new JobLogReadProperties(blank).enabled());
+			var refused = assertThrows(IllegalStateException.class, () -> new JobLogReadProperties(blank).validate());
+			assertTrue(refused.getMessage().contains("ZEROYAML_JOB_LOGS_READ_TOKEN"));
+		}
 	}
 
 	private static JobLogRecord chunk(JobId job, long sequence, JobLogRecord.Stream stream, byte[] content) {
