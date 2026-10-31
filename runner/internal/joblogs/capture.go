@@ -217,7 +217,7 @@ func (c *Capture) pendingByAge() []Stream {
 // chunks, so they stay contiguous across drops.
 //
 // A send that fails because ctx itself ended, through StopDelivery, the drain
-// bound, or the Job deadline, is lost but does not count as an ingress
+// bound, the Job deadline, or the pending-chunk share of Close, is lost but does not count as an ingress
 // failure: it says nothing about the ingress, and counting it could start a
 // cooldown that makes Close drop its pending chunks unsent. A timeout inside
 // the Sink's own per-call deadline leaves ctx intact and still counts.
@@ -295,6 +295,11 @@ func (c *Capture) StopDelivery() {
 // output-stream failure; it does not alter the command's execution outcome.
 // ctx may be detached from a cancelled execution; the Sink bounds delivery.
 // A returned error means the final marker was not acknowledged.
+//
+// Pending chunks are sent before the marker because the Control Plane refuses
+// records after a final marker, and the marker's flags must reflect their
+// delivery. They share only half of the time left in ctx, so a slow chunk
+// send cannot leave the marker without a window.
 func (c *Capture) Close(ctx context.Context, interrupted bool) error {
 	c.mu.Lock()
 	if c.closed {
@@ -312,9 +317,11 @@ func (c *Capture) Close(ctx context.Context, interrupted bool) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	flushCtx, cancelFlush := pendingFlushContext(ctx)
 	for _, stream := range c.pendingByAge() {
-		c.flush(ctx, stream)
+		c.flush(flushCtx, stream)
 	}
+	cancelFlush()
 	c.mu.Lock()
 	c.sequence++
 	record := Record{JobID: c.jobID, Sequence: c.sequence, ObservedAt: c.now().UTC(), EndOfOutput: true, Truncated: c.truncated, Incomplete: c.incomplete || interrupted}
@@ -323,4 +330,15 @@ func (c *Capture) Close(ctx context.Context, interrupted bool) error {
 		return c.sink.Append(ctx, record)
 	}
 	return nil
+}
+
+// pendingFlushContext bounds the pending-chunk sends in Close to the first half
+// of the time left in ctx, reserving the rest for the final marker. Without a
+// deadline on ctx, the Sink's per-call deadline bounds each send instead.
+func pendingFlushContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithDeadline(ctx, deadline.Add(-time.Until(deadline)/2))
 }

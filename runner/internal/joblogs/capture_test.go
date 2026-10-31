@@ -285,6 +285,31 @@ func TestCloseSendsPendingStreamsInFirstObservationOrder(t *testing.T) {
 	}
 }
 
+func TestSlowPendingChunkLeavesWindowForFinalMarker(t *testing.T) {
+	finished := make(chan Record, 1)
+	capture := NewCapture(context.Background(), "slow-leftover", sinkFunc(func(ctx context.Context, record Record) error {
+		if !record.EndOfOutput {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		finished <- record
+		return nil
+	}))
+	capture.Writer(Stdout).Write([]byte("out\n"))
+	capture.Writer(Stderr).Write([]byte("err\n"))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := capture.Close(ctx, false); err != nil {
+		t.Fatalf("final marker lost its window: %v", err)
+	}
+	if final := <-finished; final.Sequence != 3 || !final.Incomplete || !final.Truncated {
+		t.Fatalf("final = %+v", final)
+	}
+}
+
 func TestCaptureResetsDeliveryFailuresAfterAcknowledgment(t *testing.T) {
 	sink := &recordingSink{fail: map[uint64]bool{1: true, 3: true, 5: true}}
 	capture := NewCapture(context.Background(), "recovering", sink)

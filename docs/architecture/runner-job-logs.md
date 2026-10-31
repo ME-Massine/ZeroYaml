@@ -106,8 +106,13 @@ output still has a final marker. Final delivery uses a detached context, so
 cancellation can still be reported, and every call keeps its own timeout. The
 whole close (at most the two pending chunks and the final marker) has one
 overall bound of five seconds, including after a Job timeout; without it, a slow
-ingress could delay the terminal status report by three call timeouts. Output
-delivery after command exit therefore takes at most 35.6 + 5 = 40.6 seconds.
+ingress could delay the terminal status report by three call timeouts. The
+pending chunks may use only the first half of the remaining close bound, so one
+slow chunk send cannot leave the final marker without time to be delivered; a
+chunk cut off by that share is lost, and the marker reports the output as
+incomplete and truncated. The marker stays last because the Control Plane
+refuses records after a final marker. Output delivery after command exit
+therefore takes at most 35.6 + 5 = 40.6 seconds.
 When dispatch is cancelled, the close is instead bounded by one second or a
 fifth of `ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT`, whichever is shorter, to reserve
 shutdown time for terminal status reporting after cleanup.
@@ -333,7 +338,7 @@ probe, locally cancelled sends that do not start a cooldown, deadline stops
 without a capture warning, gRPC
 deadlines, age-based flushing of slow output, the budget-scaled drain bound
 after command exit, the close bound on completed, timed-out, and cancelled
-executions, log endpoint validation at configuration load, and payload exclusion
+executions, the final-marker reserve when a pending chunk send stalls, log endpoint validation at configuration load, and payload exclusion
 from operational logs. Control Plane transport tests cover byte
 fidelity, assignment validation, sequence rules, timestamp and payload bounds,
 the 1 MiB limit, completed-output and idle-stream eviction, active-retention

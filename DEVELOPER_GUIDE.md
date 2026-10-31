@@ -869,7 +869,9 @@ command exits, log delivery has ten seconds plus 100 ms per chunk still allowed
 by the capture budget (at most 35.6 seconds) to drain before the remaining
 output is marked incomplete, so slow delivery cannot hold the container or the
 terminal status report. The pending flush and final marker then share one
-five-second bound, so delivery after command exit takes at most 40.6 seconds. A
+five-second bound, so delivery after command exit takes at most 40.6 seconds;
+the pending chunks may use only half of it, which keeps a window for the final
+marker when a chunk send stalls. A
 cancelled dispatch bounds them together to one second, or a fifth of
 `ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT` if that is shorter, to reserve shutdown time
 for terminal status reporting.
