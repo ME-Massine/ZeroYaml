@@ -8,6 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -73,10 +74,7 @@ class InMemoryJobLogStore implements JobLogStore {
 		var receivedAt = clock.instant();
 		if (output == null) {
 			if (logs.size() == MAX_JOBS) {
-				var evictable = logs.entrySet().stream()
-						.filter(entry -> entry.getValue().records.getLast().endOfOutput()
-								|| !entry.getValue().lastReceivedAt.isAfter(receivedAt.minus(MAX_IDLE)))
-						.map(Map.Entry::getKey).findFirst();
+				var evictable = evictable(receivedAt);
 				if (evictable.isEmpty()) {
 					throw new JobLogCapacityException();
 				}
@@ -88,6 +86,19 @@ class InMemoryJobLogStore implements JobLogStore {
 		output.records.add(record);
 		output.bytes += record.contentSize();
 		output.lastReceivedAt = receivedAt;
+	}
+
+	@Override
+	public synchronized boolean hasAdmissionCapacity() {
+		return logs.size() < MAX_JOBS || evictable(clock.instant()).isPresent();
+	}
+
+	/** Oldest admitted stream that has finished or has been idle for MAX_IDLE. */
+	private Optional<JobId> evictable(Instant now) {
+		return logs.entrySet().stream()
+				.filter(entry -> entry.getValue().records.getLast().endOfOutput()
+						|| !entry.getValue().lastReceivedAt.isAfter(now.minus(MAX_IDLE)))
+				.map(Map.Entry::getKey).findFirst();
 	}
 
 	@Override

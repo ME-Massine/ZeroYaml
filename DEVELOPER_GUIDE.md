@@ -850,15 +850,19 @@ terminal Job are refused. Restart
 loses all logs. There is no REST/UI log viewer. Raw command bytes are
 excluded from operational logs; arbitrary secrets printed by a command are
 not automatically redacted. Job output is read from Docker Engine frames over
-`docker system dial-stdio`; stdout/stderr observations are coalesced into one
-pending 4 KiB buffer, flushed when full, on a stream switch, on a write after the
-pending bytes have waited one minute, or at close. Docker
+`docker system dial-stdio`; stdout and stderr observations are coalesced into one
+pending 4 KiB buffer per stream, flushed when full, on a write after the pending
+bytes have waited one minute, or at close. A stream switch does not flush, so
+interleaved line output cannot exhaust the chunk budget; cross-stream order is
+kept at chunk granularity. Data delivery stops only after two consecutive
+failures; an acknowledged chunk resets the count. Docker
 CLI diagnostics remain separate and are discarded. Enabling delivery overrides
 the daemon default log driver for Job containers with bounded readable `local`
 logs; disabled delivery preserves that default and starts no follower. After the
-command exits, log delivery has ten seconds to drain before the remaining output
-is marked incomplete, so slow delivery cannot hold the container or the terminal
-status report. A cancelled dispatch bounds pending flush and final delivery
+command exits, log delivery has ten seconds plus 100 ms per chunk still allowed
+by the capture budget (at most 35.6 seconds) to drain before the remaining
+output is marked incomplete, so slow delivery cannot hold the container or the
+terminal status report. A cancelled dispatch bounds pending flush and final delivery
 together to one second, or a fifth of `ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT` if that
 is shorter, to reserve shutdown time for terminal status reporting.
 An invalid `ZEROYAML_JOB_LOGS_ADDRESS` fails Runner startup.

@@ -241,6 +241,7 @@ func TestRunBoundsLogDrainAfterCommandExit(t *testing.T) {
 	s := newTestSandbox(docker)
 	s.logs = sink
 	s.logDrainTimeout = 50 * time.Millisecond
+	s.logDrainPerChunk = time.Millisecond
 	s.stream = func(ctx context.Context, stdout, _ io.Writer, _ string) error {
 		for ctx.Err() == nil {
 			stdout.Write(make([]byte, joblogs.MaxChunkBytes))
@@ -249,7 +250,7 @@ func TestRunBoundsLogDrainAfterCommandExit(t *testing.T) {
 	}
 	started := time.Now()
 	result := s.Run(context.Background(), testSpec())
-	if elapsed := time.Since(started); elapsed > s.logDrainTimeout+time.Second {
+	if elapsed := time.Since(started); elapsed > s.logDrainBound(joblogs.MaxChunks)+time.Second {
 		t.Fatalf("Run took %s; slow log delivery was not bounded after command exit", elapsed)
 	}
 	if result.Outcome != OutcomeFailed || result.ExitCode == nil || *result.ExitCode != 3 {
@@ -262,6 +263,39 @@ func TestRunBoundsLogDrainAfterCommandExit(t *testing.T) {
 		t.Fatalf("final marker = %+v after %d records", final, len(sink.records))
 	}
 	docker.assertCleanedUp(t, "checkout-id", "job-id")
+}
+
+func TestRunDrainBoundGrowsWithRemainingChunkBudget(t *testing.T) {
+	docker := newFakeDocker()
+	sink := &slowLogSink{delay: 20 * time.Millisecond}
+	s := newTestSandbox(docker)
+	s.logs = sink
+	// Twenty acknowledgments take longer than the base bound alone.
+	s.logDrainTimeout = 50 * time.Millisecond
+	s.logDrainPerChunk = 20 * time.Millisecond
+	s.stream = func(_ context.Context, stdout, _ io.Writer, _ string) error {
+		_, err := stdout.Write(make([]byte, 20*joblogs.MaxChunkBytes))
+		return err
+	}
+	if result := s.Run(context.Background(), testSpec()); result.Outcome != OutcomeSucceeded {
+		t.Fatalf("result = %+v", result)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	final := sink.records[len(sink.records)-1]
+	if len(sink.records) != 21 || !final.EndOfOutput || final.Incomplete || final.Truncated {
+		t.Fatalf("backlog tail lost: %d records, final = %+v", len(sink.records), final)
+	}
+}
+
+func TestLogDrainBoundCoversFullBacklogAtDefaultAllowance(t *testing.T) {
+	s := newTestSandbox(newFakeDocker())
+	if got, want := s.logDrainBound(joblogs.MaxChunks), 35600*time.Millisecond; got != want {
+		t.Fatalf("full-budget drain bound = %s, want %s", got, want)
+	}
+	if got := s.logDrainBound(0); got != defaultLogDrainTimeout {
+		t.Fatalf("exhausted-budget drain bound = %s", got)
+	}
 }
 
 func TestLogCloseTimeoutStaysWithinShutdownBudget(t *testing.T) {

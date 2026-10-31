@@ -6,7 +6,6 @@ import java.util.UUID;
 
 import org.springframework.stereotype.Component;
 
-import com.google.protobuf.Timestamp;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import io.zeroyaml.contracts.runner.v1.JobExecutionResult;
@@ -18,7 +17,6 @@ import io.zeroyaml.contracts.runner.v1.ReportJobStatusResponse;
 import io.zeroyaml.controlplane.domain.job.JobId;
 import io.zeroyaml.controlplane.domain.job.JobStatus;
 import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
-import io.zeroyaml.controlplane.runner.RunnerProtocolVersion;
 
 /**
  * gRPC endpoint a Runner calls to report what one execution did. Translation
@@ -78,11 +76,11 @@ class GrpcJobExecutionStatusService extends JobExecutionStatusServiceGrpc.JobExe
 	}
 
 	private static JobStatusReport toReport(ReportJobStatusRequest request) {
-		requireSupportedProtocolVersion(request.getProtocolVersion());
+		RunnerRequestValidation.requireSupportedProtocolVersion(request.getProtocolVersion());
 
 		var jobId = toJobId(request.getJobId());
 		var reportedBy = toRunnerAssignment(request);
-		var startedAt = toRequiredInstant(request.hasStartedAt(), request.getStartedAt(), "started_at");
+		var startedAt = RunnerRequestValidation.toRequiredInstant(request.hasStartedAt(), request.getStartedAt(), "started_at");
 
 		return switch (request.getState()) {
 			case JOB_EXECUTION_RUNNING -> toRunningReport(request, jobId, reportedBy, startedAt);
@@ -125,18 +123,6 @@ class GrpcJobExecutionStatusService extends JobExecutionStatusServiceGrpc.JobExe
 		return JobStatusReport.running(jobId, reportedBy, startedAt);
 	}
 
-	private static void requireSupportedProtocolVersion(String protocolVersion) {
-		if (protocolVersion == null || protocolVersion.isBlank()) {
-			throw new IllegalArgumentException("protocol_version must not be empty");
-		}
-		if (!RunnerProtocolVersion.CURRENT.equals(protocolVersion)) {
-			// The remaining fields cannot be interpreted safely under a contract
-			// this Control Plane does not implement.
-			throw new IllegalArgumentException(
-					"this control plane implements protocol version " + RunnerProtocolVersion.CURRENT);
-		}
-	}
-
 	private static JobId toJobId(String jobId) {
 		if (jobId == null || jobId.isBlank()) {
 			throw new IllegalArgumentException("job_id must not be empty");
@@ -159,21 +145,13 @@ class GrpcJobExecutionStatusService extends JobExecutionStatusServiceGrpc.JobExe
 	}
 
 	private static Instant toCompletedAt(ReportJobStatusRequest request) {
-		var completedAt = toRequiredInstant(request.hasCompletedAt(), request.getCompletedAt(), "completed_at");
-		var startedAt = toRequiredInstant(request.hasStartedAt(), request.getStartedAt(), "started_at");
+		var completedAt = RunnerRequestValidation.toRequiredInstant(request.hasCompletedAt(), request.getCompletedAt(), "completed_at");
+		var startedAt = RunnerRequestValidation.toRequiredInstant(request.hasStartedAt(), request.getStartedAt(), "started_at");
 		if (completedAt.isBefore(startedAt)) {
 			throw new IllegalArgumentException("completed_at must not be before started_at");
 		}
 
 		return completedAt;
-	}
-
-	private static Instant toRequiredInstant(boolean present, Timestamp timestamp, String fieldName) {
-		if (!present) {
-			throw new IllegalArgumentException(fieldName + " must be set");
-		}
-
-		return Instant.ofEpochSecond(timestamp.getSeconds(), timestamp.getNanos());
 	}
 
 	private static Integer exitCodeOf(JobExecutionResult result) {

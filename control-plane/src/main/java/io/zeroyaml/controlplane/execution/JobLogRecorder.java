@@ -24,6 +24,11 @@ class JobLogRecorder {
 		if (logs.appendIfRetained(record)) {
 			return true;
 		}
+		// Refuse before the PostgreSQL read: under overload every rejected record
+		// would otherwise still cost a lookup. Admission rechecks capacity.
+		if (!logs.hasAdmissionCapacity()) {
+			throw new JobLogCapacityException();
+		}
 		return jobs.find(record.jobId()).map(job -> {
 			if (job.runnerAssignment().isEmpty() || !job.runnerAssignment().get().equals(record.reportedBy())) {
 				throw new JobLogAttributionException();

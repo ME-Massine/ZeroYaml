@@ -13,11 +13,12 @@ import (
 type recordingSink struct {
 	records []Record
 	failAt  uint64
+	fail    map[uint64]bool
 }
 
 func (s *recordingSink) Append(ctx context.Context, record Record) error {
 	s.records = append(s.records, record)
-	if record.Sequence == s.failAt {
+	if record.Sequence == s.failAt || s.fail[record.Sequence] {
 		return errors.New("delivery failed")
 	}
 	return nil
@@ -74,15 +75,19 @@ func TestCaptureBoundsLargeOutputAndContinuesDraining(t *testing.T) {
 	}
 }
 
-func TestCaptureBoundsTinyWritesAcrossBothStreams(t *testing.T) {
+func TestCaptureBoundsChunkCountAcrossBothStreams(t *testing.T) {
 	sink := &recordingSink{}
 	capture := NewCapture(context.Background(), "tiny-writes", sink)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	capture.now = func() time.Time { return now }
+	// Every write ages the pending chunks, so each one forces partial chunks.
 	for i := 0; i < MaxChunks*2; i++ {
 		capture.Writer(Stream(i%2 + 1)).Write([]byte("x"))
+		now = now.Add(maxPendingAge)
 	}
 	capture.Close(context.Background(), false)
 	if len(sink.records) != MaxChunks+1 || !sink.records[MaxChunks].Truncated {
-		t.Fatal("chunk count not bounded")
+		t.Fatalf("chunk count not bounded: %d records", len(sink.records))
 	}
 	for i, record := range sink.records {
 		if record.Sequence != uint64(i+1) {
@@ -235,17 +240,81 @@ func TestStopDeliveryCancelsBlockedChunkAndDrainsLaterOutput(t *testing.T) {
 	}
 }
 
-func TestCaptureAlternatingStreamsKeepObservationOrder(t *testing.T) {
+func TestCaptureInterleavedLinesDoNotExhaustChunkBudget(t *testing.T) {
 	sink := &recordingSink{}
-	capture := NewCapture(context.Background(), "alternating", sink)
-	for i := 0; i < 20; i++ {
-		capture.Writer(Stream(i%2 + 1)).Write([]byte{byte(i)})
+	capture := NewCapture(context.Background(), "interleaved", sink)
+	inputs := map[Stream]*bytes.Buffer{Stdout: {}, Stderr: {}}
+	// Shell traces on stderr between stdout lines switch streams on every line.
+	for i := 0; i < 3000; i++ {
+		stream := Stream(i%2 + 1)
+		line := []byte(fmt.Sprintf("line %04d\n", i))
+		inputs[stream].Write(line)
+		capture.Writer(stream).Write(line)
 	}
 	capture.Close(context.Background(), false)
-	for i, record := range sink.records[:20] {
-		if record.Sequence != uint64(i+1) || record.Stream != Stream(i%2+1) || !bytes.Equal(record.Content, []byte{byte(i)}) {
-			t.Fatal("observation order changed")
+	outputs := map[Stream]*bytes.Buffer{Stdout: {}, Stderr: {}}
+	for _, record := range sink.records[:len(sink.records)-1] {
+		outputs[record.Stream].Write(record.Content)
+	}
+	want := 0
+	for _, stream := range []Stream{Stdout, Stderr} {
+		if !bytes.Equal(outputs[stream].Bytes(), inputs[stream].Bytes()) {
+			t.Fatalf("stream %d bytes changed", stream)
 		}
+		want += (inputs[stream].Len() + MaxChunkBytes - 1) / MaxChunkBytes
+	}
+	final := sink.records[len(sink.records)-1]
+	if len(sink.records)-1 != want || final.Truncated || final.Incomplete {
+		t.Fatalf("data records = %d, want %d; final = %+v", len(sink.records)-1, want, final)
+	}
+}
+
+func TestCloseSendsPendingStreamsInFirstObservationOrder(t *testing.T) {
+	sink := &recordingSink{}
+	capture := NewCapture(context.Background(), "ordered", sink)
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := start
+	capture.now = func() time.Time { return now }
+	capture.Writer(Stderr).Write([]byte("+ mvn verify\n"))
+	now = start.Add(time.Second)
+	capture.Writer(Stdout).Write([]byte("[INFO] BUILD\n"))
+	capture.Close(context.Background(), false)
+	if len(sink.records) != 3 || sink.records[0].Stream != Stderr || !sink.records[0].ObservedAt.Equal(start) ||
+		sink.records[1].Stream != Stdout || !sink.records[1].ObservedAt.Equal(now) {
+		t.Fatalf("records = %+v", sink.records)
+	}
+}
+
+func TestCaptureResetsDeliveryFailuresAfterAcknowledgment(t *testing.T) {
+	sink := &recordingSink{fail: map[uint64]bool{1: true, 3: true, 5: true}}
+	capture := NewCapture(context.Background(), "recovering", sink)
+	capture.Writer(Stdout).Write(make([]byte, 10*MaxChunkBytes))
+	capture.Close(context.Background(), false)
+	if len(sink.records) != 11 {
+		t.Fatalf("isolated failures stopped delivery: %d records", len(sink.records))
+	}
+	if final := sink.records[10]; !final.EndOfOutput || !final.Incomplete || !final.Truncated {
+		t.Fatalf("final = %+v", final)
+	}
+}
+
+func TestCaptureStopsDeliveryAfterConsecutiveFailures(t *testing.T) {
+	sink := &recordingSink{fail: map[uint64]bool{1: true, 2: true}}
+	capture := NewCapture(context.Background(), "stalled", sink)
+	capture.Writer(Stderr).Write([]byte("pending on the other stream"))
+	capture.Writer(Stdout).Write(make([]byte, 10*MaxChunkBytes))
+	capture.Close(context.Background(), false)
+	// The pending stderr chunk is dropped without another network call.
+	if len(sink.records) != 3 || sink.records[2].Sequence != 3 || !sink.records[2].EndOfOutput || !sink.records[2].Truncated {
+		t.Fatalf("records = %+v", sink.records)
+	}
+}
+
+func TestRemainingChunksCountsUnsentChunks(t *testing.T) {
+	capture := NewCapture(context.Background(), "remaining", &recordingSink{})
+	capture.Writer(Stdout).Write(make([]byte, 3*MaxChunkBytes+1))
+	if got := capture.RemainingChunks(); got != MaxChunks-3 {
+		t.Fatalf("remaining = %d, want %d", got, MaxChunks-3)
 	}
 }
 

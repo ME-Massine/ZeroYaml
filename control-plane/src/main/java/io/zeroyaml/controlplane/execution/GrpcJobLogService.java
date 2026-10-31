@@ -1,6 +1,5 @@
 package io.zeroyaml.controlplane.execution;
 
-import java.time.Instant;
 import java.util.UUID;
 
 import org.slf4j.Logger;
@@ -13,7 +12,6 @@ import io.zeroyaml.contracts.runner.v1.AppendJobLogResponse;
 import io.zeroyaml.contracts.runner.v1.JobLogServiceGrpc;
 import io.zeroyaml.controlplane.domain.job.JobId;
 import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
-import io.zeroyaml.controlplane.runner.RunnerProtocolVersion;
 
 /** Bounded log ingress registered only on the authenticated TLS listener. */
 class GrpcJobLogService extends JobLogServiceGrpc.JobLogServiceImplBase {
@@ -56,14 +54,8 @@ class GrpcJobLogService extends JobLogServiceGrpc.JobLogServiceImplBase {
 	}
 
 	private static JobLogRecord toRecord(AppendJobLogRequest request) {
-		if (!RunnerProtocolVersion.CURRENT.equals(request.getProtocolVersion())) {
-			throw new IllegalArgumentException("unsupported protocol version");
-		}
-		var timestamp = request.getObservedAt();
-		if (!request.hasObservedAt() || timestamp.getSeconds() < -62135596800L
-				|| timestamp.getSeconds() > 253402300799L || timestamp.getNanos() < 0 || timestamp.getNanos() > 999999999) {
-			throw new IllegalArgumentException("observed_at must be a valid protobuf timestamp");
-		}
+		RunnerRequestValidation.requireSupportedProtocolVersion(request.getProtocolVersion());
+		var observedAt = RunnerRequestValidation.toRequiredInstant(request.hasObservedAt(), request.getObservedAt(), "observed_at");
 		if (request.getContent().size() > JobLogRecord.MAX_CHUNK_BYTES) {
 			throw new IllegalArgumentException("chunk is too large");
 		}
@@ -75,7 +67,7 @@ class GrpcJobLogService extends JobLogServiceGrpc.JobLogServiceImplBase {
 		};
 		return new JobLogRecord(new JobId(UUID.fromString(request.getJobId())),
 				new RunnerAssignment(request.getRunnerId(), request.getInstanceId()), request.getSequence(),
-				Instant.ofEpochSecond(timestamp.getSeconds(), timestamp.getNanos()), stream,
+				observedAt, stream,
 				request.getContent().toByteArray(), request.getEndOfOutput(), request.getTruncated(), request.getIncomplete());
 	}
 }

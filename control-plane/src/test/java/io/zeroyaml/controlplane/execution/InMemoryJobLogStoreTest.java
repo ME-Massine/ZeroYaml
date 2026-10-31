@@ -58,6 +58,27 @@ class InMemoryJobLogStoreTest {
 	}
 
 	@Test
+	void reportsAdmissionCapacityWithoutEvicting() {
+		when(clock.instant()).thenReturn(NOW);
+		assertTrue(logs.hasAdmissionCapacity());
+		var admitted = fillRetention();
+		assertFalse(logs.hasAdmissionCapacity());
+		logs.append(new JobLogRecord(admitted.get(5), RUNNER, 2, NOW, JobLogRecord.Stream.NONE,
+				new byte[0], true, false, false));
+		assertTrue(logs.hasAdmissionCapacity());
+		assertEquals(2, logs.snapshot(admitted.get(5)).size());
+
+		var idle = new InMemoryJobLogStore(clock);
+		for (int index = 0; index < 32; index++) {
+			idle.append(record(JobId.newId(), 1));
+		}
+		when(clock.instant()).thenReturn(NOW.plusSeconds(299));
+		assertFalse(idle.hasAdmissionCapacity());
+		when(clock.instant()).thenReturn(NOW.plusSeconds(300));
+		assertTrue(idle.hasAdmissionCapacity());
+	}
+
+	@Test
 	void refreshesActiveOutputAndEvictsTheOldestEligibleStream() {
 		var admitted = fillRetention();
 		when(clock.instant()).thenReturn(NOW.plusSeconds(299));

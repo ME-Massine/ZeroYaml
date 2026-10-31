@@ -36,10 +36,17 @@ import (
 // execution context may already be done, so it needs a budget of its own.
 const defaultCleanupTimeout = 30 * time.Second
 
-// defaultLogDrainTimeout bounds log delivery that is still running after the
-// Job command has exited. It leaves room for a few slow chunk acknowledgments
-// without letting delivery hold the container until the execution deadline.
-const defaultLogDrainTimeout = 10 * time.Second
+// defaultLogDrainTimeout and defaultLogDrainPerChunk bound log delivery that is
+// still running after the Job command has exited. Delivery sends one chunk at
+// a time, so a fixed bound would cut the tail of a fast command with a large
+// backlog. The bound grows by the per-chunk allowance for every chunk the
+// capture budget still permits: a full 1 MiB backlog at 100 ms per
+// acknowledgment fits within the resulting 35.6 seconds, while delivery can
+// never hold the container until the execution deadline.
+const (
+	defaultLogDrainTimeout  = 10 * time.Second
+	defaultLogDrainPerChunk = 100 * time.Millisecond
+)
 
 // maxLogCloseTimeout caps the final log flush after a cancellation. The bound is
 // also limited to a fifth of the Runner shutdown budget, so the log close never
@@ -99,7 +106,9 @@ type Sandbox struct {
 	cleanupTimeout  time.Duration
 	logCloseTimeout time.Duration
 	logDrainTimeout time.Duration
-	logger          *slog.Logger
+	// logDrainPerChunk extends logDrainTimeout for each chunk still permitted.
+	logDrainPerChunk time.Duration
+	logger           *slog.Logger
 }
 
 // New creates a Sandbox that drives the Docker CLI found at dockerBinary and
@@ -125,12 +134,13 @@ func newSandbox(
 	logger *slog.Logger,
 ) *Sandbox {
 	return &Sandbox{
-		docker:          docker,
-		newID:           newID,
-		cleanupTimeout:  cleanupTimeout,
-		logCloseTimeout: maxLogCloseTimeout,
-		logDrainTimeout: defaultLogDrainTimeout,
-		logger:          logger,
+		docker:           docker,
+		newID:            newID,
+		cleanupTimeout:   cleanupTimeout,
+		logCloseTimeout:  maxLogCloseTimeout,
+		logDrainTimeout:  defaultLogDrainTimeout,
+		logDrainPerChunk: defaultLogDrainPerChunk,
+		logger:           logger,
 	}
 }
 
@@ -286,8 +296,9 @@ func (s *Sandbox) runContainer(
 
 // drainLogs waits for the follower after the command has exited. Slow but
 // successful delivery must not hold the container, the concurrency slot, and
-// the terminal status report until spec.Timeout, so the drain is bounded and
-// output still unread when the bound expires is reported as incomplete.
+// the terminal status report until spec.Timeout, so the drain is bounded by
+// logDrainBound and output still unread when the bound expires is reported as
+// incomplete.
 func (s *Sandbox) drainLogs(
 	ctx context.Context,
 	executionID string,
@@ -295,7 +306,8 @@ func (s *Sandbox) drainLogs(
 	stopFollowing context.CancelFunc,
 	capture *joblogs.Capture,
 ) {
-	timer := time.NewTimer(s.logDrainTimeout)
+	bound := s.logDrainBound(capture.RemainingChunks())
+	timer := time.NewTimer(bound)
 	defer timer.Stop()
 	var err error
 	select {
@@ -305,13 +317,19 @@ func (s *Sandbox) drainLogs(
 		stopFollowing()
 		<-followed
 		s.logger.WarnContext(ctx, "job log drain exceeded its bound", slog.String("execution_id", executionID),
-			slog.Duration("log_drain_timeout", s.logDrainTimeout))
+			slog.Duration("log_drain_timeout", bound))
 		return
 	}
 	if err != nil {
 		capture.MarkIncomplete()
 		s.logger.WarnContext(ctx, "job log capture interrupted", slog.String("execution_id", executionID))
 	}
+}
+
+// logDrainBound scales the drain with the chunks the capture may still send.
+// The remaining budget is the largest backlog delivery can still acknowledge.
+func (s *Sandbox) logDrainBound(remainingChunks int) time.Duration {
+	return s.logDrainTimeout + time.Duration(remainingChunks)*s.logDrainPerChunk
 }
 
 // interrupted classifies an execution that stopped before a command exited.

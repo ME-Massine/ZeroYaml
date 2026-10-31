@@ -123,10 +123,17 @@ class GrpcJobLogServiceTest {
 	@Test
 	void evictedStreamMustPassAuthoritativeAttributionAgain() {
 		client.appendJobLog(end(job, 1).build());
-		for (int index = 0; index < 32; index++) {
+		var active = runningJob();
+		client.appendJobLog(request(active, 1).build());
+		for (int index = 1; index < 32; index++) {
 			client.appendJobLog(request(runningJob(), 1).build());
 		}
 		assertTrue(logs.snapshot(job.id()).isEmpty());
+		// While every slot holds recent output, admission is refused before any lookup.
+		assertStatus(Status.Code.RESOURCE_EXHAUSTED,
+				request(job, 2).setInstanceId("another-instance").build());
+		verify(jobs).find(job.id());
+		client.appendJobLog(end(active, 2).build());
 		assertStatus(Status.Code.FAILED_PRECONDITION,
 				request(job, 2).setInstanceId("another-instance").build());
 		verify(jobs, org.mockito.Mockito.times(2)).find(job.id());
@@ -193,10 +200,14 @@ class GrpcJobLogServiceTest {
 		client.appendJobLog(request(job, 1).build());
 		client.appendJobLog(end(job, 2).build());
 		job.succeed(CREATED.plusSeconds(3), 0);
-		for (int index = 0; index < 32; index++) {
+		var active = runningJob();
+		client.appendJobLog(request(active, 1).build());
+		for (int index = 1; index < 32; index++) {
 			client.appendJobLog(request(runningJob(), 1).build());
 		}
 		assertTrue(logs.snapshot(job.id()).isEmpty());
+		// Free one slot so the refusal comes from the terminal Job, not capacity.
+		client.appendJobLog(end(active, 2).build());
 		assertStatus(Status.Code.FAILED_PRECONDITION, request(job, 3).build());
 		assertStatus(Status.Code.FAILED_PRECONDITION, end(job, 4).build());
 		assertTrue(logs.snapshot(job.id()).isEmpty());
@@ -285,6 +296,8 @@ class GrpcJobLogServiceTest {
 		var overflow = runningJob();
 		assertStatus(Status.Code.RESOURCE_EXHAUSTED, request(overflow, 1).build());
 		assertStatus(Status.Code.RESOURCE_EXHAUSTED, end(overflow, 2).setIncomplete(true).build());
+		// Refused admissions never cost a PostgreSQL read.
+		verify(jobs, never()).find(overflow.id());
 		assertEquals(1, logs.snapshot(job.id()).size());
 		client.appendJobLog(request(job, 2).build());
 		client.appendJobLog(end(job, 3).build());

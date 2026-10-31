@@ -123,6 +123,7 @@ func TestDockerExecutionLogCapture(t *testing.T) {
 		{name: "stdout and stderr", command: "printf hello; printf error >&2"},
 		{name: "failed command", command: "printf hello; printf error >&2; exit 7", wantCode: 7},
 		{name: "short lines", command: "i=0; while [ $i -lt 3000 ]; do printf 'line %04d\\n' $i; i=$((i+1)); done"},
+		{name: "interleaved lines", command: "i=0; while [ $i -lt 3000 ]; do printf 'out %04d\\n' $i; printf 'err %04d\\n' $i >&2; i=$((i+1)); done"},
 		{name: "large output", command: "head -c 2097152 /dev/zero", large: true},
 		{name: "cancel while following", command: "printf 'ready\\n'; sleep 300", cancel: true},
 		{name: "cancel after stderr", command: "printf 'failure diagnostics\\n' >&2; sleep 300", cancel: true},
@@ -187,6 +188,19 @@ func TestDockerExecutionLogCapture(t *testing.T) {
 				}
 				if !bytes.Equal(stdout.Bytes(), expected.Bytes()) || len(sink.records)-1 != (expected.Len()+joblogs.MaxChunkBytes-1)/joblogs.MaxChunkBytes {
 					t.Fatal("real Engine short lines truncated or not coalesced")
+				}
+			case scenario.name == "interleaved lines":
+				var expectedOut, expectedErr bytes.Buffer
+				for i := 0; i < 3000; i++ {
+					fmt.Fprintf(&expectedOut, "out %04d\n", i)
+					fmt.Fprintf(&expectedErr, "err %04d\n", i)
+				}
+				// Each stream coalesces its own chunks, so a stream switch per line
+				// spends no extra chunk budget.
+				want := (expectedOut.Len()+joblogs.MaxChunkBytes-1)/joblogs.MaxChunkBytes +
+					(expectedErr.Len()+joblogs.MaxChunkBytes-1)/joblogs.MaxChunkBytes
+				if !bytes.Equal(stdout.Bytes(), expectedOut.Bytes()) || !bytes.Equal(stderr.Bytes(), expectedErr.Bytes()) || len(sink.records)-1 != want {
+					t.Fatalf("real Engine interleaved lines: %d data records, want %d", len(sink.records)-1, want)
 				}
 			case scenario.large:
 				if stdout.Len() != joblogs.MaxOutputBytes || len(sink.records) != joblogs.MaxChunks+1 {

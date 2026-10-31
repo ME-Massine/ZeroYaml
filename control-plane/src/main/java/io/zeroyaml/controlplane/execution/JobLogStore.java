@@ -16,6 +16,13 @@ interface JobLogStore {
 	 */
 	boolean appendIfRetained(JobLogRecord record);
 
+	/**
+	 * Reports whether a new stream could currently be admitted, so callers can
+	 * refuse it before an authoritative lookup. The answer is advisory: a
+	 * concurrent admission can still make {@link #append} reject the stream.
+	 */
+	boolean hasAdmissionCapacity();
+
 	/** Returns an immutable ordered snapshot; empty also covers unknown or evicted logs. */
 	List<JobLogRecord> snapshot(JobId jobId);
 }

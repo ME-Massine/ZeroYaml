@@ -22,23 +22,29 @@ cancelled follower exits. A follower error marks output incomplete without
 copying pipe contents into execution diagnostics.
 
 `runner/internal/joblogs.Capture` serializes pipe observations and emits chunks
-of at most 4096 raw bytes. One pending buffer coalesces writes and is sent when
-it is full, when stdout/stderr switches, when a write arrives after the pending
-bytes have waited one minute, or when capture closes. Close flushes pending
-bytes before the final marker using its detached context. No timer or
-background goroutine flushes idle output, so bytes followed by silence wait
-for the next write or the end of output. The one-minute age stays well below
-the Control Plane's five-minute idle eviction, so slow but live output keeps
-its retained prefix, while 256 chunks still cover more than four hours of
-one-line-per-minute output.
+of at most 4096 raw bytes. Each stream coalesces writes into its own pending
+chunk, which is sent when it is full, when any write arrives after it has
+waited one minute, or when capture closes. A stream switch does not send a
+partial chunk: interleaved line output, such as `set -x` traces or Maven
+warnings on stderr between stdout lines, would otherwise spend one chunk per
+line and exhaust the 256-chunk budget after a few KiB. Close flushes pending
+chunks oldest first byte first, before the final marker, using its detached
+context. No timer or background goroutine flushes idle output, so bytes
+followed by silence wait for the next write or the end of output. The
+one-minute age stays well below the Control Plane's five-minute idle eviction,
+so slow but live output keeps its retained prefix, while 256 chunks still cover
+more than two hours of one-line-per-minute output on both streams.
 Partial lines, binary output, and split UTF-8 sequences
-are preserved. Sequence starts at 1 and increases across both streams.
-`observed_at` is the Runner's UTC observation time. Sequence determines order;
-timestamps may precede Control Plane Job creation because the two hosts have
-independent clocks, and may move backwards if the Runner clock changes. Bytes
-within each stream retain their order, but concurrent OS pipes cannot reconstruct exact
-cross-stream command write order. Consumers concatenate each stream's bytes
-before decoding text.
+are preserved. Sequence starts at 1 and increases across both streams in send
+order. `observed_at` is the Runner's UTC observation time of a chunk's first
+byte. Timestamps may precede Control Plane Job creation because the two hosts
+have independent clocks, and may move backwards if the Runner clock changes.
+Bytes within each stream retain their order. Across streams, order is kept at
+chunk granularity only: a full chunk of one stream can be sent before the
+other stream's older, still-filling chunk, and lines of the two streams inside
+overlapping chunks are not interleaved. Concurrent OS pipes could not
+reconstruct exact cross-stream write order either. Consumers concatenate each
+stream's bytes before decoding text.
 
 Each chunk travels synchronously over the additive
 `JobLogService.AppendJobLog` unary RPC with protocol, Job, Runner, and instance
@@ -48,16 +54,25 @@ Each call has a deadline from
 `ZEROYAML_RUNNER_STATUS_REPORT_TIMEOUT` and respects the execution deadline.
 Slow calls apply bounded backpressure without a background queue. No retries
 are configured. A failed chunk is not retried. Later chunks are still sent after
-one failure; after a second data delivery failure for the same Job, the Runner
-drains remaining output without further data RPCs so a stalled ingress cannot
-consume the execution deadline through repeated timeouts. The final marker is
-still attempted.
-Once the command has exited, the follower gets a fixed ten-second drain bound.
-Slow but successful delivery would otherwise hold the container, the
-concurrency slot, and the terminal status report until the execution deadline.
-When the bound expires, the sandbox cancels in-flight and later data delivery,
-stops the follower, and marks the output `incomplete`; pending bytes and the
-final marker are still sent by Close.
+a failure, and every acknowledged chunk resets the failure count. After two
+consecutive data delivery failures for the same Job, the Runner drains
+remaining output, including the other stream's pending chunk, without further
+data RPCs so a stalled ingress cannot consume the execution deadline through
+repeated timeouts. Isolated failures, such as `FAILED_PRECONDITION` before the
+running report commits and a network interruption an hour later, therefore
+never disable delivery for the rest of a Job. The final marker is still
+attempted.
+Once the command has exited, the follower gets a drain bound of ten seconds plus
+100 ms for every data chunk the capture budget still permits, at most 35.6
+seconds. Delivery sends one chunk at a time, so a fixed ten-second bound would
+cut the tail of a fast command with a large backlog (1 MiB at 50 ms round-trip
+time needs about 12.8 seconds). The remaining budget is the largest backlog
+delivery can still acknowledge, and the bound shrinks as it is spent. Slow but
+successful delivery would otherwise hold the container, the concurrency slot,
+and the terminal status report until the execution deadline. When the bound
+expires, the sandbox cancels in-flight and later data delivery, stops the
+follower, and marks the output `incomplete`; pending bytes and the final marker
+are still sent by Close.
 The final marker sets both `incomplete` and `truncated` when a data delivery was
 not acknowledged; that chunk may have been retained if only its response was
 lost. Sequence gaps describe missing observations without poisoning later calls.
@@ -89,11 +104,13 @@ marker; marking an output-source error does not wait for delivery.
 
 ## Resource and retention bounds
 
-Capture sends at most 256 data chunks plus one final marker, keeping only the
-current chunk, an eight-byte frame header, and a fixed 4096-byte frame buffer in
-Runner memory, alongside fixed CLI pipe buffers. The combined
-stdout/stderr byte budget is 1 MiB. Frequent stream switches can exhaust the
-chunk budget first; short writes on one stream share a chunk. When delivery is
+Capture sends at most 256 data chunks plus one final marker, keeping only one
+pending chunk per stream, an eight-byte frame header, and a fixed 4096-byte
+frame buffer in Runner memory, alongside fixed CLI pipe buffers. A chunk counts
+against the budget when it starts, so both streams' pending chunks always fit.
+The combined stdout/stderr byte budget is 1 MiB. Short writes and stream
+switches share chunks; only age-based flushes of slow output spend partial
+chunks. When delivery is
 enabled, the Runner overrides the daemon default with the `local` Job log driver
 to provide readable, bounded Engine logs, with `max-size=10m`
 and `max-file=1` (compression disabled, as required for a single file); its
@@ -122,6 +139,11 @@ that report was lost and no assignment exists, logs are refused; a later
 terminal status report may still recover Job state. Admission uses a read-only
 `JobStore.find`: the assignment never changes once set. Later chunks and the final
 marker validate against the retained Runner identity without a PostgreSQL read.
+Admission checks retention capacity before that lookup, so overload never costs
+a database read per refused record. At full retention, a record that needs
+admission therefore returns `RESOURCE_EXHAUSTED` even if it would otherwise be
+refused for its attribution or a terminal Job; the capacity check is advisory
+and admission rechecks it under the retention lock.
 The retained check and append are atomic with eviction; an absent or evicted
 stream must pass authoritative attribution again before admission. Concurrent
 first records may each perform a lookup, but sequence validation still admits
@@ -162,7 +184,9 @@ can also lose its earlier output; late records may form a new retained fragment,
 and the missing initial sequences signal that earlier observations are absent.
 `snapshot(JobId)` returns immutable ordered records with defensive byte copies;
 an empty list means unknown or evicted output. Restart loses every record. Durable storage, REST exposure,
-search, and a browser viewer are outside this change.
+search, and a browser viewer are outside this change. `snapshot` has no
+production caller yet; the first Control Plane reader of retained output is
+follow-up work.
 
 Output can contain secrets deliberately printed by user commands. No automatic
 redaction is claimed. Payloads are carried only in the log contract and never
@@ -218,12 +242,15 @@ checks still apply after authentication.
 ## Verification
 
 The normal Runner suite covers both streams, raw bytes, deterministic sequence
-context, concurrent writes, empty output, large output, tiny-write limits,
-failed execution, cancellation, capture errors, gRPC deadlines, age-based
-flushing of slow output, the drain bound after command exit, the shutdown-derived
-close bound, and payload exclusion from operational logs. Control Plane transport tests cover byte
+context, concurrent writes, empty output, large output, interleaved line output
+within the chunk budget, the chunk-count limit, failed execution, cancellation,
+capture errors, failure-count reset and consecutive-failure stop, gRPC
+deadlines, age-based flushing of slow output, the budget-scaled drain bound
+after command exit, the shutdown-derived close bound, and payload exclusion
+from operational logs. Control Plane transport tests cover byte
 fidelity, assignment validation, sequence rules, timestamp and payload bounds,
-the 1 MiB limit, completed-output and idle-stream eviction, active-retention saturation,
+the 1 MiB limit, completed-output and idle-stream eviction, active-retention
+saturation without a Job lookup, shared protocol and timestamp validation,
 immutable snapshots, retained output of failed Jobs, and refused admission for
 terminal Jobs, including after a finished stream was evicted. Regression tests also cover independent
 host clocks, sequence gaps after loss, cancellation of blocked delivery,
