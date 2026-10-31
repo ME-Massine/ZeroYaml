@@ -283,8 +283,9 @@ an actionable message instead of failing on the first delivery.
 Issues [#18](https://github.com/MohamedMBG/ZeroYaml/issues/18) and
 [#19](https://github.com/MohamedMBG/ZeroYaml/issues/19) delivered the
 `RepositoryConnection` aggregate and its PostgreSQL store. No HTTP API exposes
-them yet — `GitHubWebhookController` is the Control Plane's only REST
-controller — so a local connection record is inserted directly. Webhook
+them yet (the Control Plane's REST endpoints are the GitHub webhook and the
+token-protected Job log reader), so a local connection record is inserted
+directly. Webhook
 authentication does not depend on this record; it is what later phases read to
 decide which repository a delivery belongs to.
 

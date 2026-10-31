@@ -97,6 +97,13 @@ class JobLogTlsTest {
 			server.stop();
 		}
 		assertFalse(server.isRunning());
+		// A restart gets a fresh bounded executor; the stopped one is never reused.
+		server.start();
+		try {
+			assertTrue(server.isRunning());
+		} finally {
+			server.stop();
+		}
 	}
 
 	@Test

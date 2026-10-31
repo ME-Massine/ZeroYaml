@@ -847,7 +847,11 @@ streams idle for at least five minutes can be evicted; full retention with recen
 active output refuses new Jobs' logs. Final markers after retention loss are
 accepted and stored as incomplete; records that would open a new stream for a
 terminal Job are refused. Restart
-loses all logs. There is no REST/UI log viewer. Raw command bytes are
+loses all logs. `GET /api/v1/jobs/{jobId}/logs` reads retained output; it answers
+`404` until `ZEROYAML_JOB_LOGS_READ_TOKEN` holds a bearer token of at least 32
+characters, and every read needs `Authorization: Bearer <token>`. There is no UI
+log viewer. Log ingress runs on 8 fixed worker threads with at most 64
+concurrent calls. Raw command bytes are
 excluded from operational logs; arbitrary secrets printed by a command are
 not automatically redacted. Job output is read from Docker Engine frames over
 `docker system dial-stdio`; stdout and stderr observations are coalesced into one

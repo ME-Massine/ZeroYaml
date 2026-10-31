@@ -183,10 +183,47 @@ Job at capacity, with no background sweep. A running Job silent for five minutes
 can also lose its earlier output; late records may form a new retained fragment,
 and the missing initial sequences signal that earlier observations are absent.
 `snapshot(JobId)` returns immutable ordered records with defensive byte copies;
-an empty list means unknown or evicted output. Restart loses every record. Durable storage, REST exposure,
-search, and a browser viewer are outside this change. `snapshot` has no
-production caller yet; the first Control Plane reader of retained output is
-follow-up work.
+an empty list means unknown or evicted output. Restart loses every record. Durable storage,
+search, and a browser viewer are outside this change.
+
+## Reading retained output
+
+`GET /api/v1/jobs/{jobId}/logs` returns the retained output of one Job through
+`JobLogStore.snapshot`. It is disabled until `zeroyaml.job-logs.read.token`
+(`ZEROYAML_JOB_LOGS_READ_TOKEN`) is set to a token of at least 32 characters;
+while disabled, every request answers `404`, like an absent endpoint. Logs can
+contain secrets printed by user commands, so reading always requires
+`Authorization: Bearer <token>`. The token check runs before the Job identity is
+parsed and compares SHA-256 digests in constant time. One shared token is the
+smallest viable control while the Control Plane has no user authentication;
+anyone holding it can read every retained log, so store and rotate it like the
+webhook secret. Rotating it means restarting with a new value.
+
+| Status | Meaning |
+| --- | --- |
+| `200` | Retained data chunks in sequence order, `Cache-Control: no-store`. |
+| `400` | The Job identity is not a UUID. |
+| `401` | Missing, malformed, or wrong bearer token (`WWW-Authenticate: Bearer`). |
+| `404` | Reader disabled, or output unknown, evicted, or not yet received. |
+
+```json
+{
+  "jobId": "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+  "endOfOutput": true,
+  "truncated": false,
+  "incomplete": false,
+  "records": [
+    { "sequence": 1, "stream": "STDOUT", "observedAt": "2026-10-31T10:00:00Z", "content": "aGVsbG8K" }
+  ]
+}
+```
+
+`content` is base64 of the raw bytes, so binary output and split UTF-8 survive;
+concatenate each stream's decoded bytes before decoding text. `endOfOutput` is
+false while the Job runs or when its final marker was lost; `truncated` and
+`incomplete` are then `null` because completeness is unknown. A response holds at
+most 1 MiB of output. Reads are logged with the Job identity and record count,
+never with content.
 
 Output can contain secrets deliberately printed by user commands. No automatic
 redaction is claimed. Payloads are carried only in the log contract and never
@@ -231,9 +268,18 @@ Provision certificates outside the repository through the deployment's PKI:
 | Runner | `ZEROYAML_JOB_LOGS_CERTIFICATE` | PEM Runner client certificate chain path. |
 | Runner | `ZEROYAML_JOB_LOGS_PRIVATE_KEY` | PEM Runner private key path. |
 | Runner | `ZEROYAML_JOB_LOGS_CA` | PEM CA bundle for server verification. |
+| Control Plane | `zeroyaml.job-logs.read.token` / `ZEROYAML_JOB_LOGS_READ_TOKEN` | Bearer token for the read endpoint, at least 32 characters; unset disables reading. |
 
 The server limits incoming log messages to 8192 bytes (including metadata fields
-in the protobuf record) and TLS handshakes to five seconds. Invalid or missing
+in the protobuf record) and TLS handshakes to five seconds. Calls run on a fixed
+pool of 8 worker threads instead of grpc-java's unbounded cached executor: the
+retention lock and the Job lookup serialize most work, so more threads would
+only wait. At most 64 calls run at once, twice the 32 retained Jobs, because each
+Runner sends one call at a time per Job. Further calls are answered
+`RESOURCE_EXHAUSTED` immediately, before the certificate identity check, and the Runner treats
+them like any other lost chunk. The work queue is bounded at 512 tasks, above
+what 64 calls can schedule. The Runner-facing registration/status server still
+uses the default executor; bounding it is separate work. Invalid or missing
 client credentials fail the handshake. A verified certificate without the Runner
 URI SAN returns `UNAUTHENTICATED`; a different authenticated Runner ID returns
 `PERMISSION_DENIED`, without retaining content. Payload validation and assignment
@@ -250,7 +296,8 @@ after command exit, the shutdown-derived close bound, and payload exclusion
 from operational logs. Control Plane transport tests cover byte
 fidelity, assignment validation, sequence rules, timestamp and payload bounds,
 the 1 MiB limit, completed-output and idle-stream eviction, active-retention
-saturation without a Job lookup, shared protocol and timestamp validation,
+saturation without a Job lookup, shared protocol and timestamp validation, the
+concurrent call limit and permit release, the authenticated read endpoint,
 immutable snapshots, retained output of failed Jobs, and refused admission for
 terminal Jobs, including after a finished stream was evicted. Regression tests also cover independent
 host clocks, sequence gaps after loss, cancellation of blocked delivery,
