@@ -70,7 +70,7 @@ func run() error {
 		// Registered before dispatcher.Close so executions drain first.
 		defer func() {
 			if err := logReporter.Close(); err != nil {
-				logger.Warn("job log connection close failed")
+				logger.Warn("job log connection close failed", slog.String("error", err.Error()))
 			}
 		}()
 	} else {
@@ -118,7 +118,7 @@ func run() error {
 	// container cleanup and status reporting.
 	dispatcher := jobexecution.NewDispatcher(
 		ctx,
-		sandbox.New(dockerBinary, logger, logSink),
+		sandbox.New(dockerBinary, logger, logSink, cfg.ShutdownTimeout),
 		jobstatus.NewReporter(cfg.ControlPlaneAddress, identity, cfg.StatusReportTimeout, logger),
 		sandbox.Settings{
 			Image:           cfg.JobImage,

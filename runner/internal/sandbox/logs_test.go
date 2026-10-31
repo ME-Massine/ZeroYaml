@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -211,6 +212,69 @@ func TestRunBoundsLogCloseAfterCancellation(t *testing.T) {
 		t.Fatal("log close delayed terminal status beyond cancellation bound")
 	}
 	docker.assertCleanedUp(t, "checkout-id", "job-id")
+}
+
+// slowLogSink acknowledges every record after a delay, like a healthy but
+// slow ingress.
+type slowLogSink struct {
+	mu      sync.Mutex
+	delay   time.Duration
+	records []joblogs.Record
+}
+
+func (s *slowLogSink) Append(ctx context.Context, r joblogs.Record) error {
+	select {
+	case <-time.After(s.delay):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.records = append(s.records, r)
+	return nil
+}
+
+func TestRunBoundsLogDrainAfterCommandExit(t *testing.T) {
+	docker := newFakeDocker()
+	docker.exitCodes["job-id"] = "3"
+	sink := &slowLogSink{delay: 20 * time.Millisecond}
+	s := newTestSandbox(docker)
+	s.logs = sink
+	s.logDrainTimeout = 50 * time.Millisecond
+	s.stream = func(ctx context.Context, stdout, _ io.Writer, _ string) error {
+		for ctx.Err() == nil {
+			stdout.Write(make([]byte, joblogs.MaxChunkBytes))
+		}
+		return ctx.Err()
+	}
+	started := time.Now()
+	result := s.Run(context.Background(), testSpec())
+	if elapsed := time.Since(started); elapsed > s.logDrainTimeout+time.Second {
+		t.Fatalf("Run took %s; slow log delivery was not bounded after command exit", elapsed)
+	}
+	if result.Outcome != OutcomeFailed || result.ExitCode == nil || *result.ExitCode != 3 {
+		t.Fatalf("result = %+v", result)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	final := sink.records[len(sink.records)-1]
+	if !final.EndOfOutput || !final.Incomplete || len(sink.records) > joblogs.MaxChunks {
+		t.Fatalf("final marker = %+v after %d records", final, len(sink.records))
+	}
+	docker.assertCleanedUp(t, "checkout-id", "job-id")
+}
+
+func TestLogCloseTimeoutStaysWithinShutdownBudget(t *testing.T) {
+	for shutdown, want := range map[time.Duration]time.Duration{
+		5 * time.Second:        time.Second,
+		time.Minute:            time.Second,
+		time.Second:            200 * time.Millisecond,
+		100 * time.Millisecond: 20 * time.Millisecond,
+	} {
+		if got := New("docker", slog.New(slog.DiscardHandler), nil, shutdown).logCloseTimeout; got != want {
+			t.Errorf("log close timeout for %s shutdown = %s, want %s", shutdown, got, want)
+		}
+	}
 }
 
 func TestRunWithoutLogDeliveryDoesNotFollowOrWarn(t *testing.T) {

@@ -28,6 +28,12 @@ class JobLogRecorder {
 			if (job.runnerAssignment().isEmpty() || !job.runnerAssignment().get().equals(record.reportedBy())) {
 				throw new JobLogAttributionException();
 			}
+			// The Runner sends its final marker before the terminal status report,
+			// so a legitimate record never reaches a terminal Job. Refusing it here
+			// keeps a closed log closed after its retained stream was evicted.
+			if (job.status().isTerminal()) {
+				throw new JobLogSequenceException("log is closed because the Job has finished");
+			}
 			// Runner and Control Plane clocks are independent. Sequence orders
 			// observations without comparing timestamps from different hosts.
 			logs.append(record);

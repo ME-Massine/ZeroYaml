@@ -180,6 +180,61 @@ func TestCaptureCoalescesShortLines(t *testing.T) {
 	}
 }
 
+func TestCaptureFlushesSlowOutputOnceItReachesPendingAge(t *testing.T) {
+	sink := &recordingSink{}
+	capture := NewCapture(context.Background(), "slow", sink)
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := start
+	capture.now = func() time.Time { return now }
+	capture.Writer(Stdout).Write([]byte("first\n"))
+	now = start.Add(maxPendingAge - time.Second)
+	capture.Writer(Stdout).Write([]byte("second\n"))
+	if len(sink.records) != 0 {
+		t.Fatalf("writes within the pending age were not coalesced: %+v", sink.records)
+	}
+	now = start.Add(maxPendingAge)
+	capture.Writer(Stdout).Write([]byte("third\n"))
+	if len(sink.records) != 1 || string(sink.records[0].Content) != "first\nsecond\n" || !sink.records[0].ObservedAt.Equal(start) {
+		t.Fatalf("aged pending output was not delivered as its own record: %+v", sink.records)
+	}
+	capture.Close(context.Background(), false)
+	if len(sink.records) != 3 || string(sink.records[1].Content) != "third\n" || !sink.records[1].ObservedAt.Equal(now) || sink.records[2].Incomplete {
+		t.Fatalf("records after the aged flush = %+v", sink.records)
+	}
+}
+
+func TestStopDeliveryCancelsBlockedChunkAndDrainsLaterOutput(t *testing.T) {
+	entered := make(chan struct{})
+	var records []Record
+	capture := NewCapture(context.Background(), "stopped", sinkFunc(func(ctx context.Context, record Record) error {
+		records = append(records, record)
+		if record.EndOfOutput || record.Sequence > 1 {
+			return nil
+		}
+		close(entered)
+		<-ctx.Done()
+		return ctx.Err()
+	}))
+	written := make(chan struct{})
+	go func() { capture.Writer(Stdout).Write(make([]byte, MaxChunkBytes)); close(written) }()
+	<-entered
+	capture.StopDelivery()
+	select {
+	case <-written:
+	case <-time.After(time.Second):
+		t.Fatal("stopped delivery left the writer blocked")
+	}
+	if n, err := capture.Writer(Stderr).Write([]byte("late")); n != 4 || err != nil {
+		t.Fatalf("late write = %d, %v", n, err)
+	}
+	if err := capture.Close(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || !records[1].EndOfOutput || !records[1].Incomplete || !records[1].Truncated {
+		t.Fatalf("records = %+v", records)
+	}
+}
+
 func TestCaptureAlternatingStreamsKeepObservationOrder(t *testing.T) {
 	sink := &recordingSink{}
 	capture := NewCapture(context.Background(), "alternating", sink)

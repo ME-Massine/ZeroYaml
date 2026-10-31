@@ -16,6 +16,12 @@ const (
 	MaxChunks      = 256
 )
 
+// maxPendingAge bounds how long slow output waits for a full chunk. It stays
+// well below the Control Plane's five-minute retention idle limit, so a live
+// stream keeps its retained prefix, and high enough to protect the chunk budget:
+// 256 chunks still cover more than four hours of slow output.
+const maxPendingAge = time.Minute
+
 // Stream identifies the command output pipe.
 type Stream int
 
@@ -47,7 +53,8 @@ type Sink interface {
 // no background queue. Slow delivery applies backpressure to the Docker CLI.
 // Failed chunks are not retried; delivery stops after two failures so a stalled
 // ingress cannot consume the Job deadline one chunk at a time.
-// One pending chunk coalesces writes until full, a stream switch, or Close.
+// One pending chunk coalesces writes until full, a stream switch, a write after
+// the chunk has waited maxPendingAge, or Close. No timer flushes idle output.
 // Cross-pipe ordering reflects observation, not write time.
 type Capture struct {
 	mu               sync.Mutex
@@ -123,7 +130,7 @@ func (w streamWriter) Write(p []byte) (int, error) {
 			break
 		}
 		c.mu.Unlock()
-		if len(c.pending) > 0 && c.pendingStream != w.stream {
+		if len(c.pending) > 0 && (c.pendingStream != w.stream || c.now().Sub(c.pendingAt) >= maxPendingAge) {
 			c.flush(c.ctx)
 			continue
 		}
@@ -170,6 +177,16 @@ func (c *Capture) MarkIncomplete() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.incomplete = true
+}
+
+// StopDelivery cancels in-flight and later chunk delivery and marks the output
+// incomplete. Later writes are drained without retention; Close still flushes
+// the pending chunk and sends the final marker under its own context.
+func (c *Capture) StopDelivery() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.incomplete = true
+	c.cancel()
 }
 
 // Close attempts exactly one final marker. interrupted also covers a Docker

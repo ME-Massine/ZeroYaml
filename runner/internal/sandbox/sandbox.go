@@ -36,6 +36,17 @@ import (
 // execution context may already be done, so it needs a budget of its own.
 const defaultCleanupTimeout = 30 * time.Second
 
+// defaultLogDrainTimeout bounds log delivery that is still running after the
+// Job command has exited. It leaves room for a few slow chunk acknowledgments
+// without letting delivery hold the container until the execution deadline.
+const defaultLogDrainTimeout = 10 * time.Second
+
+// maxLogCloseTimeout caps the final log flush after a cancellation. The bound is
+// also limited to a fifth of the Runner shutdown budget, so the log close never
+// consumes the time reserved for container cleanup and the terminal status
+// report, even with a short ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT.
+const maxLogCloseTimeout = time.Second
+
 // Outcome categorizes how an execution ended.
 type Outcome string
 
@@ -87,16 +98,24 @@ type Sandbox struct {
 	newID           func() (string, error)
 	cleanupTimeout  time.Duration
 	logCloseTimeout time.Duration
+	logDrainTimeout time.Duration
 	logger          *slog.Logger
 }
 
 // New creates a Sandbox that drives the Docker CLI found at dockerBinary and
 // delivers bounded Job output to logs. A nil sink disables log following.
-func New(dockerBinary string, logger *slog.Logger, logs joblogs.Sink) *Sandbox {
+// shutdownTimeout is the Runner's shutdown budget; it bounds the final log
+// flush after a cancellation.
+func New(dockerBinary string, logger *slog.Logger, logs joblogs.Sink, shutdownTimeout time.Duration) *Sandbox {
 	s := newSandbox(cliDocker(dockerBinary), newExecutionID, defaultCleanupTimeout, logger)
 	s.stream = cliDockerStream(dockerBinary)
 	s.logs = logs
+	s.logCloseTimeout = logCloseTimeout(shutdownTimeout)
 	return s
+}
+
+func logCloseTimeout(shutdownTimeout time.Duration) time.Duration {
+	return min(maxLogCloseTimeout, shutdownTimeout/5)
 }
 
 func newSandbox(
@@ -106,12 +125,11 @@ func newSandbox(
 	logger *slog.Logger,
 ) *Sandbox {
 	return &Sandbox{
-		docker:         docker,
-		newID:          newID,
-		cleanupTimeout: cleanupTimeout,
-		// Reserve shutdown time for terminal status after log flush and cleanup.
-		// Keep this below the default Runner ShutdownTimeout (5 seconds).
-		logCloseTimeout: time.Second,
+		docker:          docker,
+		newID:           newID,
+		cleanupTimeout:  cleanupTimeout,
+		logCloseTimeout: maxLogCloseTimeout,
+		logDrainTimeout: defaultLogDrainTimeout,
 		logger:          logger,
 	}
 }
@@ -237,16 +255,22 @@ func (s *Sandbox) runContainer(
 		output, err := s.docker(runCtx, "wait", containerID)
 		wait <- waitResult{output, err}
 	}()
+	var followed chan error
+	followCtx, stopFollowing := context.WithCancel(runCtx)
+	defer stopFollowing()
 	if s.logs != nil && capture != nil && s.stream != nil {
 		// Following after start also reads output from a command that already
 		// exited. Checkout output is excluded because it can contain credentials.
-		if err := s.stream(runCtx, capture.Writer(joblogs.Stdout), capture.Writer(joblogs.Stderr), containerID); err != nil {
-			capture.MarkIncomplete()
-			s.logger.WarnContext(ctx, "job log capture interrupted", slog.String("execution_id", executionID))
-		}
+		followed = make(chan error, 1)
+		go func() {
+			followed <- s.stream(followCtx, capture.Writer(joblogs.Stdout), capture.Writer(joblogs.Stderr), containerID)
+		}()
 	}
 
 	result := <-wait
+	if followed != nil {
+		s.drainLogs(ctx, executionID, followed, stopFollowing, capture)
+	}
 	output, err = result.output, result.err
 	if err != nil {
 		return 0, err
@@ -258,6 +282,36 @@ func (s *Sandbox) runContainer(
 	}
 
 	return int32(exitCode), nil
+}
+
+// drainLogs waits for the follower after the command has exited. Slow but
+// successful delivery must not hold the container, the concurrency slot, and
+// the terminal status report until spec.Timeout, so the drain is bounded and
+// output still unread when the bound expires is reported as incomplete.
+func (s *Sandbox) drainLogs(
+	ctx context.Context,
+	executionID string,
+	followed <-chan error,
+	stopFollowing context.CancelFunc,
+	capture *joblogs.Capture,
+) {
+	timer := time.NewTimer(s.logDrainTimeout)
+	defer timer.Stop()
+	var err error
+	select {
+	case err = <-followed:
+	case <-timer.C:
+		capture.StopDelivery()
+		stopFollowing()
+		<-followed
+		s.logger.WarnContext(ctx, "job log drain exceeded its bound", slog.String("execution_id", executionID),
+			slog.Duration("log_drain_timeout", s.logDrainTimeout))
+		return
+	}
+	if err != nil {
+		capture.MarkIncomplete()
+		s.logger.WarnContext(ctx, "job log capture interrupted", slog.String("execution_id", executionID))
+	}
 }
 
 // interrupted classifies an execution that stopped before a command exited.

@@ -171,13 +171,35 @@ class GrpcJobLogServiceTest {
 	}
 
 	@Test
-	void permitsLogsForFailedJobsAndExplicitlyIncompleteFinalGaps() {
-		job.fail(new io.zeroyaml.controlplane.domain.job.JobFailure("NON_ZERO_EXIT", "command failed"), CREATED.plusSeconds(3));
+	void retainedLogsOfFailedJobsAcceptExplicitlyIncompleteFinalGaps() {
 		client.appendJobLog(request(job, 1).setStream(JobLogStream.JOB_LOG_STREAM_STDERR).build());
+		job.fail(new io.zeroyaml.controlplane.domain.job.JobFailure("NON_ZERO_EXIT", "command failed"), CREATED.plusSeconds(3));
 		client.appendJobLog(end(job, 3).setIncomplete(true).setTruncated(true).build());
 		assertEquals(JobStatus.FAILED, job.status());
 		assertTrue(logs.snapshot(job.id()).getLast().incomplete());
 		assertTrue(logs.snapshot(job.id()).getLast().truncated());
+	}
+
+	@Test
+	void refusesNewStreamsForFinishedJobs() {
+		job.succeed(CREATED.plusSeconds(3), 0);
+		assertStatus(Status.Code.FAILED_PRECONDITION, request(job, 1).build());
+		assertStatus(Status.Code.FAILED_PRECONDITION, end(job, 1).build());
+		assertTrue(logs.snapshot(job.id()).isEmpty());
+	}
+
+	@Test
+	void evictedFinishedStreamOfTerminalJobRefusesLaterRecords() {
+		client.appendJobLog(request(job, 1).build());
+		client.appendJobLog(end(job, 2).build());
+		job.succeed(CREATED.plusSeconds(3), 0);
+		for (int index = 0; index < 32; index++) {
+			client.appendJobLog(request(runningJob(), 1).build());
+		}
+		assertTrue(logs.snapshot(job.id()).isEmpty());
+		assertStatus(Status.Code.FAILED_PRECONDITION, request(job, 3).build());
+		assertStatus(Status.Code.FAILED_PRECONDITION, end(job, 4).build());
+		assertTrue(logs.snapshot(job.id()).isEmpty());
 	}
 
 	@Test

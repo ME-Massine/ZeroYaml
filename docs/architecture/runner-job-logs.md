@@ -22,10 +22,15 @@ cancelled follower exits. A follower error marks output incomplete without
 copying pipe contents into execution diagnostics.
 
 `runner/internal/joblogs.Capture` serializes pipe observations and emits chunks
-of at most 4096 raw bytes. One pending buffer coalesces writes until full,
-until stdout/stderr switches, or until capture closes. Close flushes pending
-bytes before the final marker using its detached context. Low-volume output
-can therefore remain buffered until a stream switch or end of output.
+of at most 4096 raw bytes. One pending buffer coalesces writes and is sent when
+it is full, when stdout/stderr switches, when a write arrives after the pending
+bytes have waited one minute, or when capture closes. Close flushes pending
+bytes before the final marker using its detached context. No timer or
+background goroutine flushes idle output, so bytes followed by silence wait
+for the next write or the end of output. The one-minute age stays well below
+the Control Plane's five-minute idle eviction, so slow but live output keeps
+its retained prefix, while 256 chunks still cover more than four hours of
+one-line-per-minute output.
 Partial lines, binary output, and split UTF-8 sequences
 are preserved. Sequence starts at 1 and increases across both streams.
 `observed_at` is the Runner's UTC observation time. Sequence determines order;
@@ -47,6 +52,12 @@ one failure; after a second data delivery failure for the same Job, the Runner
 drains remaining output without further data RPCs so a stalled ingress cannot
 consume the execution deadline through repeated timeouts. The final marker is
 still attempted.
+Once the command has exited, the follower gets a fixed ten-second drain bound.
+Slow but successful delivery would otherwise hold the container, the
+concurrency slot, and the terminal status report until the execution deadline.
+When the bound expires, the sandbox cancels in-flight and later data delivery,
+stops the follower, and marks the output `incomplete`; pending bytes and the
+final marker are still sent by Close.
 The final marker sets both `incomplete` and `truncated` when a data delivery was
 not acknowledged; that chunk may have been retained if only its response was
 lost. Sequence gaps describe missing observations without poisoning later calls.
@@ -68,8 +79,9 @@ no stream, before the dispatcher reports terminal execution status:
 Non-zero command exit alone does not make output incomplete. An empty command
 output still has a final marker. Final delivery uses a detached context with
 the same call timeout so cancellation can still be reported. When dispatch is
-cancelled, the whole close (pending flush and final marker) has a one-second
-bound to reserve shutdown time for terminal status reporting after cleanup.
+cancelled, the whole close (pending flush and final marker) is bounded by one
+second or a fifth of `ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT`, whichever is shorter,
+to reserve shutdown time for terminal status reporting after cleanup.
 The process shutdown budget still bounds the overall drain. Capture state
 locks are never held over network I/O. Closing cancels an active data call,
 waits for its completion under the caller's context, then attempts the final
@@ -125,8 +137,12 @@ marker following any gap is retained as incomplete, even if the sender reports
 complete delivery: acknowledged chunks may have been evicted locally. The
 server preserves the sender's sequence, timestamp, and truncation flag.
 Duplicate and decreasing sequences are refused rather than retained twice.
-Receiving logs for a terminal Job is valid,
-because status and output are separate observations.
+A retained stream still accepts its remaining records after the Job reaches a
+terminal state, because status and output are separate observations. A record
+that needs admission (no retained stream, or an evicted one) for a terminal Job
+returns `FAILED_PRECONDITION`: the Runner sends its final marker before the
+terminal status report, so a legitimate record never needs admission after
+completion, and an evicted finished log cannot be reopened as a new fragment.
 
 `JobLogStore` is the application-facing retention boundary. The in-memory
 implementation keeps at most 32 Jobs, each bounded to 1 MiB and 257 records.
@@ -203,11 +219,13 @@ checks still apply after authentication.
 
 The normal Runner suite covers both streams, raw bytes, deterministic sequence
 context, concurrent writes, empty output, large output, tiny-write limits,
-failed execution, cancellation, capture errors, gRPC deadlines, and payload
-exclusion from operational logs. Control Plane transport tests cover byte
+failed execution, cancellation, capture errors, gRPC deadlines, age-based
+flushing of slow output, the drain bound after command exit, the shutdown-derived
+close bound, and payload exclusion from operational logs. Control Plane transport tests cover byte
 fidelity, assignment validation, sequence rules, timestamp and payload bounds,
 the 1 MiB limit, completed-output and idle-stream eviction, active-retention saturation,
-immutable snapshots, and failed Jobs. Regression tests also cover independent
+immutable snapshots, retained output of failed Jobs, and refused admission for
+terminal Jobs, including after a finished stream was evicted. Regression tests also cover independent
 host clocks, sequence gaps after loss, cancellation of blocked delivery,
 connection reuse, TLS trust, forged certificate/request identities, read-only
 PostgreSQL attribution during a locked lifecycle update, and storage failures. Test

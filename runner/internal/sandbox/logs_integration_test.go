@@ -131,7 +131,7 @@ func TestDockerExecutionLogCapture(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			sink := &logSink{}
-			s := New("docker", slog.New(slog.DiscardHandler), sink)
+			s := New("docker", slog.New(slog.DiscardHandler), sink, 5*time.Second)
 			if scenario.cancel {
 				follow := s.stream
 				s.stream = func(ctx context.Context, stdout, stderr io.Writer, containerID string) error {

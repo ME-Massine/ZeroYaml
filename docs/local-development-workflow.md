@@ -28,10 +28,11 @@ question.
 
 ## 2. What the documented path covers today
 
-Phase 2 is in delivery, so the push-to-execution chain is wired at both ends
-and not yet joined in the middle. The table states which step this document can
-reproduce and which it cannot, so missing wiring stays distinguishable from a
-broken environment.
+Phase 2 is in delivery. Most steps of the push-to-execution chain now exist on
+`main`, but nothing calls them in sequence yet. The table shows which steps
+this document can reproduce and which it cannot, so missing wiring is not
+mistaken for a broken environment. "Built, not called" means the component and
+its tests are on `main`, but no production code path invokes it.
 
 | Step | State | Where |
 | --- | --- | --- |
@@ -40,23 +41,25 @@ broken environment.
 | Runner starts, probes Docker, registers, heartbeats | Wired | [Section 4](#4-startup-order) |
 | Connected repository metadata is persisted | Wired; no HTTP API yet | [Section 6](#6-connect-a-repository) |
 | A signed `push` delivery is authenticated and accepted | Wired | [Section 7](#7-trigger-the-supported-push-scenario) |
-| An accepted delivery is normalized into an internal event | Not wired — [#20](https://github.com/MohamedMBG/ZeroYaml/issues/20) | [Section 7](#7-trigger-the-supported-push-scenario) |
-| A pipeline is inferred for the repository | Not wired — [#21](https://github.com/MohamedMBG/ZeroYaml/issues/21), [#22](https://github.com/MohamedMBG/ZeroYaml/issues/22) | [Section 9](#9-expected-states) |
-| Executable Jobs are created and recorded | Not wired — [#23](https://github.com/MohamedMBG/ZeroYaml/issues/23) | [Section 9](#9-expected-states) |
-| A healthy Runner is selected and the Job is dispatched | Not wired — [#24](https://github.com/MohamedMBG/ZeroYaml/issues/24) | [Section 9](#9-expected-states) |
+| An accepted branch push is normalized into a `RepositoryPushEvent` | Wired; the event is logged and nothing consumes it yet | [Section 7](#7-trigger-the-supported-push-scenario) |
+| A pipeline is inferred for the repository | Built, not called ([#22](https://github.com/MohamedMBG/ZeroYaml/issues/22)); joined by [#30](https://github.com/MohamedMBG/ZeroYaml/issues/30) | [Section 11](#11-automated-coverage) |
+| Executable Jobs are created and recorded | Built, not called ([#23](https://github.com/MohamedMBG/ZeroYaml/issues/23)); joined by [#30](https://github.com/MohamedMBG/ZeroYaml/issues/30) | [Section 8.2](#82-record-the-job-first-and-follow-its-state) records one by hand |
+| A healthy Runner is selected and the Job is dispatched | Selection built, not called ([#24](https://github.com/MohamedMBG/ZeroYaml/issues/24)); dispatch joined by [#30](https://github.com/MohamedMBG/ZeroYaml/issues/30) | [Section 8](#8-observe-one-job-execution) dispatches by hand |
 | A dispatched Job runs in Docker and reports running and terminal status | Wired | [Section 8](#8-observe-one-job-execution) |
-| Job logs are streamed and captured | Not wired — [#26](https://github.com/MohamedMBG/ZeroYaml/issues/26) | [Section 9](#9-expected-states) |
-| Recorded Job state survives a Control Plane restart | Wired by the local [#28](https://github.com/MohamedMBG/ZeroYaml/issues/28) change; the manual dispatch in Section 8 bypasses this store | [Section 9](#9-expected-states) |
-| Lifecycle events are published | Not wired — [#29](https://github.com/MohamedMBG/ZeroYaml/issues/29) | [Section 3](#3-prerequisites) |
+| Status reports move a recorded Job through `RUNNING` to `SUCCEEDED` or `FAILED` in PostgreSQL | Wired ([#27](https://github.com/MohamedMBG/ZeroYaml/issues/27), [#28](https://github.com/MohamedMBG/ZeroYaml/issues/28)) | [Section 8.2](#82-record-the-job-first-and-follow-its-state) |
+| Recorded Job state survives a Control Plane restart | Wired ([#28](https://github.com/MohamedMBG/ZeroYaml/issues/28)) | [Section 9](#persistence-checks) |
+| Job logs are streamed and captured | Not wired — [#26](https://github.com/MohamedMBG/ZeroYaml/issues/26) | [Section 9](#persistence-checks) |
+| Lifecycle events are published | Wired, off by default ([#29](https://github.com/MohamedMBG/ZeroYaml/issues/29)); only recorded Jobs produce events | [Section 9](#job-lifecycle-events) |
 | One push produces one executed pipeline | Not wired — [#30](https://github.com/MohamedMBG/ZeroYaml/issues/30) | [Section 9](#9-expected-states) |
 | An automated test covers the whole chain | Not wired — [#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) | [Section 11](#11-automated-coverage) |
 
-Sections 7 and 8 are therefore two verifiable halves rather than one continuous
-run: a delivery stops at the Control Plane audit record, and an execution is
-started by dispatching a Job directly to the Runner. Issue
-[#30](https://github.com/MohamedMBG/ZeroYaml/issues/30) joins them, and
-[#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) adds the automated test
-this document must then be checked against.
+Sections 7 and 8 are therefore still two verifiable halves, not one continuous
+run. A delivery ends at the normalization log line. An execution starts when a
+Job is dispatched directly to the Runner, and its state is persisted when the
+Job was recorded first. Issue
+[#30](https://github.com/MohamedMBG/ZeroYaml/issues/30) joins the two halves,
+and [#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) adds the automated
+test this document must then be checked against.
 
 ## 3. Prerequisites
 
@@ -165,8 +168,11 @@ for a secret.
 
 Expected during startup:
 
-- Flyway applies `V1__create_repository_connection.sql` and reports the schema
-  version it migrated to, before the service accepts traffic;
+- Flyway applies `V1__create_repository_connection.sql` and
+  `V2__create_pipeline_run_and_job.sql` before the service accepts traffic,
+  and logs `Successfully applied 2 migrations to schema "public", now at version
+  v2` on a fresh database. Later starts log `Schema "public" is up to date. No
+  migration necessary.`;
 - the HTTP port is bound on `8080`, the Spring Boot default, because
   `application.properties` sets no `server.port`;
 - the runner-facing gRPC endpoint is bound on `zeroyaml.registration.port`
@@ -306,10 +312,28 @@ in
 ## 7. Trigger the supported push scenario
 
 `push` is the only supported event. The Control Plane answers `202 Accepted`
-for a verified `push`, `200 OK` with outcome `IGNORED` for `ping` and every
-other verified event, and rejects an invalid envelope or signature before any
-downstream processing. The full validation order and response contract are in
+for a verified `push` whose payload normalizes, `200 OK` with outcome `IGNORED`
+for `ping` and every other verified event, and rejects an invalid envelope or
+signature before any downstream processing. A verified `push` that lacks a
+field normalization needs is answered `400` with outcome `REJECTED`. The full
+validation order and response contract are in
 [`github-webhook-ingress.md`](./architecture/github-webhook-ingress.md).
+
+Normalization reads these payload fields and nothing else:
+
+| Field | Read for | Requirement |
+| --- | --- | --- |
+| `ref` | Every push | A non-blank string |
+| `deleted` | Every push | A boolean |
+| `ref` (branch rule) | A non-deleted, non-tag push | `refs/heads/<branch>` with a valid branch name; any other ref is rejected |
+| `after` | A non-deleted branch push | The pushed commit, 40 or 64 hexadecimal characters |
+| `repository.owner.login`, `repository.name` | A non-deleted branch push | Non-blank strings |
+| `head_commit.timestamp` | A non-deleted branch push | An ISO-8601 time with an offset, such as `2026-10-26T10:00:00Z` |
+
+Normalization stops after `ref` and `deleted` when `deleted` is `true` or `ref`
+starts with `refs/tags/`. Such a push is answered `202` without an event, even
+when `after`, `repository`, or `head_commit` is missing, and a deletion is not
+checked against the branch rule, because neither case has a commit to execute.
 
 ### 7.1 Signed local delivery
 
@@ -329,7 +353,7 @@ started the Control Plane.
 $secretFile = Join-Path $HOME '.zeroyaml-webhook-secret'
 $secret = [IO.File]::ReadAllText($secretFile)
 $payloadFile = Join-Path ([IO.Path]::GetTempPath()) 'zeroyaml-push.json'
-[IO.File]::WriteAllText($payloadFile, '{"ref":"refs/heads/main","after":"0f4b1a1e2c3d4e5f60718293a4b5c6d7e8f90a1b"}')
+[IO.File]::WriteAllText($payloadFile, '{"ref":"refs/heads/main","deleted":false,"after":"0f4b1a1e2c3d4e5f60718293a4b5c6d7e8f90a1b","repository":{"name":"zeroyaml","owner":{"login":"mohamedmbg"}},"head_commit":{"timestamp":"2026-10-26T10:00:00Z"}}')
 
 $hmac = New-Object System.Security.Cryptography.HMACSHA256 -ArgumentList (,[Text.Encoding]::UTF8.GetBytes($secret))
 $digest = ($hmac.ComputeHash([IO.File]::ReadAllBytes($payloadFile)) |
@@ -345,7 +369,7 @@ curl.exe -i -X POST http://localhost:8080/webhooks/github `
 
 ```bash
 payload_file="$(mktemp)"
-printf '%s' '{"ref":"refs/heads/main","after":"0f4b1a1e2c3d4e5f60718293a4b5c6d7e8f90a1b"}' > "$payload_file"
+printf '%s' '{"ref":"refs/heads/main","deleted":false,"after":"0f4b1a1e2c3d4e5f60718293a4b5c6d7e8f90a1b","repository":{"name":"zeroyaml","owner":{"login":"mohamedmbg"}},"head_commit":{"timestamp":"2026-10-26T10:00:00Z"}}' > "$payload_file"
 
 digest="$(perl -MDigest::SHA=hmac_sha256_hex -e '
   local $/;
@@ -378,33 +402,39 @@ HTTP/1.1 202
 Expected Control Plane log lines, in this order:
 
 ```text
-INFO  .g.w.LoggingGitHubWebhookDeliveryHandler : GitHub delivery 72d3162e-... for event push recorded without further processing (<n> payload bytes)
-INFO  i.z.c.g.webhook.GitHubWebhookController  : Accepted GitHub delivery 72d3162e-... for event push (<n> payload bytes)
+INFO  .NormalizingGitHubWebhookDeliveryHandler : Normalized GitHub push delivery 72d3162e-... for repository mohamedmbg/zeroyaml on branch main at commit 0f4b1a1e2c3d4e5f60718293a4b5c6d7e8f90a1b
+INFO  i.z.c.g.webhook.GitHubWebhookController  : Accepted GitHub delivery 72d3162e-... for event push (207 payload bytes)
 ```
 
 The controller logs `Accepted` only after the delivery handler returns, so the
-handler line comes first and is the current end of the chain. The delivery handler writes an
-audit record and starts no pipeline work, which is the expected behavior until
-[#20](https://github.com/MohamedMBG/ZeroYaml/issues/20) normalizes accepted
-deliveries. Neither line contains the payload or the signature.
+handler line comes first. The normalized `RepositoryPushEvent` is the current
+end of the chain: nothing infers a pipeline or creates Jobs from it until
+[#30](https://github.com/MohamedMBG/ZeroYaml/issues/30). Normalization does not
+consult the connection record from [Section 6](#6-connect-a-repository), so the
+same delivery is accepted whether or not the repository is connected. Neither
+line contains the payload or the signature.
 
-Each negative check below proves the authentication gate rather than the happy
-path, so each is worth running once:
+Each negative check below proves a gate rather than the happy path, so each is
+worth running once. Rows that change the body need a new digest computed over
+the new bytes.
 
 | Change to the request | Expected |
 | --- | --- |
 | Corrupt one character of the digest | `401`, outcome `REJECTED`, `WARN` log, no handler line |
 | Drop the `X-Hub-Signature-256` header | `401`, outcome `REJECTED` |
-| `X-GitHub-Event: ping`, same body and digest | `200`, outcome `IGNORED` |
+| `X-GitHub-Event: ping`, same body and digest | `200`, outcome `IGNORED`, message `ping acknowledged; no pipeline work is started` |
 | `X-GitHub-Event: pull_request`, same body and digest | `200`, outcome `IGNORED` |
 | Drop the `X-GitHub-Delivery` header | `400`, outcome `REJECTED` |
 | `Content-Type: text/plain` | `415`, outcome `REJECTED` |
 | Body above `zeroyaml.github.webhook.max-payload-size` | `413`, outcome `REJECTED` |
+| Remove `head_commit` from the body, signed again | `400`, outcome `REJECTED`, message naming the field: ``payload field `head_commit` must be an object`` |
+| `{"ref":"refs/heads/main","after":"<sha>"}`, signed again | `400`, outcome `REJECTED`: ``payload field `deleted` must be a boolean`` |
+| `"ref":"refs/tags/v1"` or `"deleted":true`, signed again | `202`, outcome `ACCEPTED`, and the handler logs that the delivery `has no executable branch commit; no repository event was emitted` |
 
 The signature covers the body bytes only, so changing a header never requires a
 new digest. An unverified delivery is rejected before the event allow-list is
 consulted, so an unauthenticated caller cannot learn which events the endpoint
-acts on.
+acts on. Normalization runs only after the signature is verified.
 
 ### 7.2 Delivery from GitHub itself
 
@@ -424,13 +454,20 @@ there instead of pushing again.
 
 ## 8. Observe one job execution
 
-Nothing in the Control Plane creates or dispatches a Job yet
-([#23](https://github.com/MohamedMBG/ZeroYaml/issues/23),
-[#24](https://github.com/MohamedMBG/ZeroYaml/issues/24)), so the execution half
-is exercised by dispatching one `RunJob` by hand. This verifies the Runner
-sandbox, the status-report contract, and the Control Plane's reconciliation of
-a report — the parts [#30](https://github.com/MohamedMBG/ZeroYaml/issues/30)
-will drive from a push.
+Job creation ([#23](https://github.com/MohamedMBG/ZeroYaml/issues/23)) and
+Runner selection ([#24](https://github.com/MohamedMBG/ZeroYaml/issues/24)) exist,
+but no push calls them yet, so the execution half is exercised by dispatching
+one `RunJob` by hand. This verifies the Runner sandbox, the status-report
+contract, and the Control Plane's reconciliation of a report, which are the
+parts [#30](https://github.com/MohamedMBG/ZeroYaml/issues/30) will drive from a
+push.
+
+[Section 8.1](#81-dispatch-an-unrecorded-job) dispatches a Job the Control
+Plane has never recorded, so every report is refused.
+[Section 8.2](#82-record-the-job-first-and-follow-its-state) records the Job in
+PostgreSQL first, so the same reports move it to a terminal state.
+
+### 8.1 Dispatch an unrecorded Job
 
 Prepare a source repository below `ZEROYAML_RUNNER_LOCAL_SOURCE_ROOT`. Start in
 the repository root: both blocks return there, and the dispatch that follows
@@ -542,11 +579,11 @@ WARN  i.z.c.e.JobExecutionStatusRecorder : Job <uuid> reported SUCCEEDED by runn
 ```
 
 `decision=unknown_job` is the correct answer here, not a defect. The Control
-Plane owns authoritative Job state and never invents a Job from a report, and a
-hand-dispatched Job was never recorded because nothing creates Jobs yet. Once
-[#23](https://github.com/MohamedMBG/ZeroYaml/issues/23) records created Jobs,
-the same two reports are answered `applied` with `job_state` `running` and then
-`succeeded`.
+Plane owns authoritative Job state and never invents a Job from a report, and
+this Job was never recorded. Once
+[#30](https://github.com/MohamedMBG/ZeroYaml/issues/30) creates Jobs from a
+push, the same two reports are answered `applied`, as
+[Section 8.2](#82-record-the-job-first-and-follow-its-state) shows by hand.
 
 Docker checks for the same execution:
 
@@ -571,6 +608,95 @@ Runner still removes every resource. The Runner's `job execution finished`
 WARN record includes the execution failure `message` alongside the outcome and
 exit code; status-report acknowledgment records omit that message.
 
+### 8.2 Record the Job first and follow its state
+
+Status reports update a Job only when PostgreSQL already holds it. Until
+[#30](https://github.com/MohamedMBG/ZeroYaml/issues/30) records Jobs from a
+push, one `QUEUED` row is inserted by hand, and the dispatch reuses its
+identifier. Run this in the shell that prepared `$revision`, from the
+repository root:
+
+```powershell
+$jobId = [guid]::NewGuid().ToString()
+"INSERT INTO job (id, repository_location, revision, command_json, working_directory, status, created_at, queued_at) VALUES ('$jobId', 'file:///C:/zeroyaml-sources/demo', '$revision', '[""sh"",""-c"",""cat greeting.txt""]', '.', 'QUEUED', now() - interval '1 minute', now() - interval '1 minute');" |
+  docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml
+
+$request = @{
+  protocol_version = 'runner.v1'
+  job = @{
+    job_id     = $jobId
+    repository = @{ location = 'file:///C:/zeroyaml-sources/demo'; revision = $revision }
+    execution  = @{ command = @('sh', '-c', 'cat greeting.txt'); working_directory = '.' }
+  }
+} | ConvertTo-Json -Depth 5
+
+$request | grpcurl -plaintext -import-path proto -proto runner/v1/runner.proto `
+  -d '@' localhost:50051 zeroyaml.runner.v1.RunnerService/RunJob
+```
+
+```bash
+job_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml <<SQL
+INSERT INTO job (id, repository_location, revision, command_json, working_directory, status, created_at, queued_at)
+VALUES ('$job_id', 'file://$HOME/zeroyaml-sources/demo', '$revision', '["sh","-c","cat greeting.txt"]', '.', 'QUEUED',
+        now() - interval '1 minute', now() - interval '1 minute');
+SQL
+
+grpcurl -plaintext -import-path proto -proto runner/v1/runner.proto -d @ \
+  localhost:50051 zeroyaml.runner.v1.RunnerService/RunJob <<JSON
+{
+  "protocol_version": "runner.v1",
+  "job": {
+    "job_id": "$job_id",
+    "repository": { "location": "file://$HOME/zeroyaml-sources/demo", "revision": "$revision" },
+    "execution": { "command": ["sh", "-c", "cat greeting.txt"], "working_directory": "." }
+  }
+}
+JSON
+```
+
+The SQL is sent on standard input rather than as a `-c` argument, so the double
+quotes in `command_json` reach `psql` intact in every shell. The creation time
+is set one minute in the past on purpose. The Control Plane
+refuses a report whose start time precedes the Job's `created_at`, because that
+would record a Job that ran before it existed. The start time comes from the
+Runner host and `now()` from the database container, and the Docker Desktop VM
+clock can run ahead of the host, so an unadjusted row can turn a valid report
+into a refusal.
+
+Expected Runner records:
+
+```text
+level=INFO msg="job status report acknowledged" job_id=<uuid> reported_state=running runner_id=local-runner instance_id=<uuid> decision=applied job_state=running
+level=INFO msg="job execution finished" job_id=<uuid> execution_id=<id> outcome=succeeded duration=<d> exit_code=0
+level=INFO msg="job status report acknowledged" job_id=<uuid> reported_state=succeeded runner_id=local-runner instance_id=<uuid> decision=applied job_state=succeeded
+```
+
+Expected Control Plane record for the running report, followed by one for the
+terminal report:
+
+```text
+INFO  i.z.c.e.JobExecutionStatusRecorder : Job <uuid> reported RUNNING by runner local-runner instance <uuid>: Job <uuid> is running
+```
+
+Read the state back:
+
+```powershell
+docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml -c "SELECT id, status, runner_id, failure_code, exit_code FROM job;"
+```
+
+The row shows `SUCCEEDED` with runner `local-runner` and exit code `0`. With
+the command `sh -c 'exit 3'` in both the row and the dispatch, the Runner logs
+`outcome=failed ... exit_code=3 message="job command exited with code 3"`, the
+terminal report is acknowledged with `failure_reason=non_zero_exit
+decision=applied job_state=failed`, and the row shows `FAILED` with failure
+code `NON_ZERO_EXIT` and exit code `3`.
+
+Keep these rows for now. The restart check under
+[Persistence checks](#persistence-checks) reads them back, and
+[Removing the test Job rows](#removing-the-test-job-rows) deletes them once
+that check is done.
+
 ## 9. Expected states
 
 ### Job lifecycle
@@ -581,9 +707,9 @@ mirrored to the Runner as `JobLifecycleState`):
 
 | State | Meaning | Reached by | Observable today |
 | --- | --- | --- | --- |
-| `CREATED` | The Job exists and has not been offered to a Runner | Job creation from a pipeline | No — [#23](https://github.com/MohamedMBG/ZeroYaml/issues/23) |
-| `QUEUED` | The Job is waiting for a Runner | A Control Plane scheduling decision a Runner never observes or reports | No — [#24](https://github.com/MohamedMBG/ZeroYaml/issues/24) |
-| `RUNNING` | The Runner reported `JOB_EXECUTION_RUNNING` | An accepted `RunJob`, then a running report | The report is sent and reconciled ([Section 8](#8-observe-one-job-execution)); it is applied only once Jobs are recorded |
+| `CREATED` | The Job exists and has not been offered to a Runner | Job creation from a pipeline (`PipelineJobCreationService`) | No; nothing calls Job creation until [#30](https://github.com/MohamedMBG/ZeroYaml/issues/30) |
+| `QUEUED` | The Job is waiting for a Runner | A Control Plane scheduling decision a Runner never observes or reports | Only as the hand-inserted row in [Section 8.2](#82-record-the-job-first-and-follow-its-state) |
+| `RUNNING` | The Runner reported `JOB_EXECUTION_RUNNING` | An accepted `RunJob`, then a running report | Yes, for a recorded Job ([Section 8.2](#82-record-the-job-first-and-follow-its-state)); refused as `unknown_job` otherwise ([Section 8.1](#81-dispatch-an-unrecorded-job)) |
 | `SUCCEEDED` | The command exited `0` | Terminal report `JOB_EXECUTION_SUCCEEDED` | As above |
 | `FAILED` | Non-zero exit, timeout, cancellation, or execution error | Terminal report `JOB_EXECUTION_FAILED` with a failure reason | As above |
 | `CANCELLED` | The Control Plane stopped the Job | A Control Plane decision. A Runner reports a cancelled execution as `FAILED` with reason `cancelled` and never reports `CANCELLED` | No |
@@ -629,15 +755,50 @@ the Control Plane `registration` tests ([Section 11](#11-automated-coverage)).
 | Migration recorded | `... -c "SELECT version, description, success FROM flyway_schema_history;"` | `1` and `2`, each with `success = t` |
 | Connection row | `... -c "SELECT provider, owner, name, status FROM repository_connection;"` | The row from [Section 6](#6-connect-a-repository) |
 | Connection survives a restart | `docker compose -f ./infra/compose.yaml down`, then `up -d postgres`, then repeat the row check | The row is still present, because `down` without `-v` removes the container and keeps the `postgres-data` volume. Not executed yet; run once by hand and record the result |
-| Recorded Job state survives a restart | `... -c "SELECT id, status, started_at, completed_at FROM job;"` before and after restarting the Control Plane | Rows are retained in PostgreSQL. Section 8 does not create one because it dispatches directly to the Runner; the PostgreSQL integration test for #28 verifies the state round trip |
+| Recorded Job state survives a restart | `... -c "SELECT id, status, started_at, completed_at FROM job;"` before and after restarting the Control Plane | The rows from [Section 8.2](#82-record-the-job-first-and-follow-its-state) are unchanged |
 
-The restart check recreates PostgreSQL, not the Control Plane, because the row
-lives in the database and a Control Plane restart cannot lose it. Database
-calls made while PostgreSQL is down fail until it is back. Restarting the
-Control Plane is not part of this check and has a side effect: it empties the
-in-memory Runner registry, so the Runner from
-[Section 4.3](#43-runner) is answered `HEARTBEAT_UNKNOWN_RUNNER` from then on
-and must be restarted to register again.
+The connection check recreates PostgreSQL, not the Control Plane, because the
+row lives in the database and a Control Plane restart cannot lose it. Database
+calls made while PostgreSQL is down fail until it is back.
+
+The Job check restarts the Control Plane, which has a side effect: it empties
+the in-memory Runner registry, so the Runner from [Section 4.3](#43-runner)
+logs `msg="runner heartbeat reported unknown runner"` with `message="Runner
+local-runner is not registered"` from then on and must be restarted to
+register again.
+
+#### Removing the test Job rows
+
+Run this only after the Job restart check above, because it deletes the rows
+that check reads. Rows inserted in
+[Section 8.2](#82-record-the-job-first-and-follow-its-state) are local test
+data. Remove only those rows, so Job history from other work in a reused
+database is kept. Run the command from the shell that inserted the row, which
+still holds its identifier:
+
+```powershell
+docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml -c "DELETE FROM job WHERE id = '$jobId';"
+```
+
+```bash
+docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml -c "DELETE FROM job WHERE id = '$job_id';"
+```
+
+Each run of the Section 8.2 block replaces the identifier held in the shell, so
+the succeeded and the failed run leave only the last one there. List the rows
+inserted from the demo source, then set `$jobId` or `job_id` to each earlier
+identifier and repeat the delete:
+
+```powershell
+docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml -c "SELECT id, status, created_at FROM job WHERE repository_location = 'file:///C:/zeroyaml-sources/demo';"
+```
+
+```bash
+docker exec -i zeroyaml-postgres psql -U zeroyaml -d zeroyaml -c "SELECT id, status, created_at FROM job WHERE repository_location = 'file://$HOME/zeroyaml-sources/demo';"
+```
+
+To discard every local row instead, remove the whole database as described in
+[Section 12](#12-shut-down).
 
 Captured Job logs have no persistence check yet; log streaming is
 [#26](https://github.com/MohamedMBG/ZeroYaml/issues/26). Until then, command
@@ -690,11 +851,15 @@ event, so until then the consumer may warn that the topic is unknown. Each
 line printed is the Job identity followed by one JSON envelope.
 
 An event is published only for a Job that the Control Plane records.
-[Section 8](#8-observe-one-job-execution) dispatches a Job by hand and records
-none, so it produces no event. The stream receives events from a running
-Control Plane only once a push creates Jobs
-([#30](https://github.com/MohamedMBG/ZeroYaml/issues/30)). Until then, the
-integration test above is the executable check.
+[Section 8.1](#81-dispatch-an-unrecorded-job) records none, so it produces no
+event. [Section 8.2](#82-record-the-job-first-and-follow-its-state) records a
+`QUEUED` row by hand, so with publication enabled its applied running and
+terminal reports publish `job.started` and then `job.succeeded` or
+`job.failed`. `job.accepted` comes only from Job creation for a pipeline,
+which nothing calls until a push creates Jobs
+([#30](https://github.com/MohamedMBG/ZeroYaml/issues/30)). The Section 8.2
+stream has not been observed in a recorded manual run, so the integration test
+above remains the executable check.
 
 With publication enabled and Kafka stopped, the Control Plane still starts,
 acknowledges webhooks, and records reports. It logs
@@ -710,10 +875,13 @@ take up to 30 s.
 | Startup fails with `zeroyaml.github.webhook.secret must be set to at least 16 characters` | The secret is missing or too short | Set `ZEROYAML_GITHUB_WEBHOOK_SECRET` in the shell that starts the Control Plane; it is never read from a tracked file |
 | `401`, outcome `REJECTED`, no handler log line | The signature is missing, malformed, or was computed with a different secret | Recompute the digest over the exact bytes sent, with no trailing newline, and confirm the GitHub webhook secret matches the environment value |
 | `400`, outcome `REJECTED` | `X-GitHub-Event` or `X-GitHub-Delivery` is missing, or the body is not a JSON object | Send both headers and a JSON object body |
+| `400`, outcome `REJECTED`, message ``payload field `<name>` must be ...`` | A verified `push` lacks a field that normalization needs, or the field has the wrong type | Send every field listed in [Section 7](#7-trigger-the-supported-push-scenario); a payload written for an older version of this document lacks `deleted`, `repository`, and `head_commit` |
 | `415` | The content type is not JSON | Use `Content-Type: application/json`, and set the same on the GitHub webhook |
 | `413` | The payload is above `zeroyaml.github.webhook.max-payload-size` | Raise the limit, up to GitHub's 25 MB cap, or send a smaller payload |
 | `200`, outcome `IGNORED`, for a push | `X-GitHub-Event` is not `push` | `push` is the only supported event; `ping` and all others are ignored by design |
-| `202` but no pipeline runs | Expected today | The delivery handler only writes an audit line until [#20](https://github.com/MohamedMBG/ZeroYaml/issues/20) |
+| `202` and a `Normalized GitHub push delivery` line, but no pipeline runs | Expected today | Nothing consumes the normalized event until [#30](https://github.com/MohamedMBG/ZeroYaml/issues/30) |
+| `202` and a `has no executable branch commit` line | The push was a tag or a branch deletion | Expected; only a branch push carries a commit to execute |
+| Status reports for a recorded Job answered `unknown_job`, or refused for a start before creation | The Job row is missing, uses another identifier, or its `created_at` is later than the reported start | Insert the row before dispatching, reuse its `id` as `job_id`, and backdate `created_at` as in [Section 8.2](#82-record-the-job-first-and-follow-its-state) |
 | GitHub reports a delivery error while local `curl` works | The tunnel is down or the URL is wrong | Fix the tunnel, then redeliver from **Recent Deliveries** rather than pushing again |
 
 ### gRPC
@@ -788,7 +956,10 @@ What the suites already cover, per step of this document:
 | Step | Covered by |
 | --- | --- |
 | Webhook envelope, signature, event allow-list, response contract | Control Plane `github.webhook` tests |
+| Push normalization, including tag pushes, deletions, and rejected fields | Control Plane `github.webhook` tests |
 | Repository connection persistence and constraints | Control Plane `connection` tests, against a Testcontainers PostgreSQL |
+| Pipeline inference, Job creation, and Runner selection | Control Plane `PipelineInferrerTest`, `PipelineJobCreationServiceTest`, and `RunnerSelectionIntegrationTest`; none is called from a push yet |
+| Job and pipeline run persistence | Control Plane `JdbcJobStoreTest`, against a Testcontainers PostgreSQL |
 | Registration, heartbeat, and derived liveness | Control Plane `registration` tests; Runner `registrationclient` and `heartbeat` tests |
 | `RunJob` validation, acceptance, and rejection | Runner `grpcserver` tests, including over the transport |
 | Container execution, cleanup, and result mapping | Runner `sandbox` tests; `TestDockerExecution*` for real containers |
@@ -797,8 +968,13 @@ What the suites already cover, per step of this document:
 | A push through to an execution | Not covered — [#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) |
 
 No automated test spans a push to an execution yet. The two halves in Sections
-7 and 8 were each executed by hand on Windows on 2026-10-11, and nothing has
-run them as one continuous push-to-execution scenario. When
+7 and 8 were last executed by hand against `main` on Windows on 2026-10-26,
+with PowerShell 7.6.7, Git Bash with `perl`, and `grpcurl` run from the
+`fullstorydev/grpcurl:v1.9.3` container. That run covered the signed delivery
+and its negative checks, the unrecorded and recorded dispatches, the failure
+path, and the Job row surviving a Control Plane restart. Windows PowerShell 5.1
+was not part of that run, and nothing has run the halves as one continuous
+push-to-execution scenario. When
 [#31](https://github.com/MohamedMBG/ZeroYaml/issues/31) lands, this document
 must be checked against that test and corrected wherever the two disagree; the
 test is authoritative.

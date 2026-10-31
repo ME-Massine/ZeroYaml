@@ -845,17 +845,22 @@ call; failures do not change execution status. The Control Plane retains at
 most 32 Jobs' logs in memory through `JobLogStore.snapshot`. Finished output or
 streams idle for at least five minutes can be evicted; full retention with recent
 active output refuses new Jobs' logs. Final markers after retention loss are
-accepted and stored as incomplete. Restart
+accepted and stored as incomplete; records that would open a new stream for a
+terminal Job are refused. Restart
 loses all logs. There is no REST/UI log viewer. Raw command bytes are
 excluded from operational logs; arbitrary secrets printed by a command are
 not automatically redacted. Job output is read from Docker Engine frames over
 `docker system dial-stdio`; stdout/stderr observations are coalesced into one
-pending 4 KiB buffer, flushed when full, on a stream switch, or at close. Docker
+pending 4 KiB buffer, flushed when full, on a stream switch, on a write after the
+pending bytes have waited one minute, or at close. Docker
 CLI diagnostics remain separate and are discarded. Enabling delivery overrides
 the daemon default log driver for Job containers with bounded readable `local`
-logs; disabled delivery preserves that default and starts no follower. A cancelled
-dispatch bounds pending flush and final delivery together to one second to reserve
-shutdown time for terminal status reporting.
+logs; disabled delivery preserves that default and starts no follower. After the
+command exits, log delivery has ten seconds to drain before the remaining output
+is marked incomplete, so slow delivery cannot hold the container or the terminal
+status report. A cancelled dispatch bounds pending flush and final delivery
+together to one second, or a fifth of `ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT` if that
+is shorter, to reserve shutdown time for terminal status reporting.
 An invalid `ZEROYAML_JOB_LOGS_ADDRESS` fails Runner startup.
 See [Runner job logs](./docs/architecture/runner-job-logs.md).
 

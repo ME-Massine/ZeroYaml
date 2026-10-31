@@ -78,6 +78,10 @@ const (
 	envJobTimeout          = "ZEROYAML_RUNNER_JOB_TIMEOUT"
 	envMaxConcurrentJobs   = "ZEROYAML_RUNNER_MAX_CONCURRENT_JOBS"
 	envLocalSourceRoot     = "ZEROYAML_RUNNER_LOCAL_SOURCE_ROOT"
+	envJobLogsAddress      = "ZEROYAML_JOB_LOGS_ADDRESS"
+	envJobLogsCertificate  = "ZEROYAML_JOB_LOGS_CERTIFICATE"
+	envJobLogsPrivateKey   = "ZEROYAML_JOB_LOGS_PRIVATE_KEY"
+	envJobLogsCA           = "ZEROYAML_JOB_LOGS_CA"
 )
 
 // Config contains startup configuration for the Runner process.
@@ -166,10 +170,10 @@ func Load() (Config, error) {
 
 	cfg := Config{
 		JobLogs: joblogs.Endpoint{
-			Address:     valueFromEnv("ZEROYAML_JOB_LOGS_ADDRESS", ""),
-			Certificate: valueFromEnv("ZEROYAML_JOB_LOGS_CERTIFICATE", ""),
-			PrivateKey:  valueFromEnv("ZEROYAML_JOB_LOGS_PRIVATE_KEY", ""),
-			CA:          valueFromEnv("ZEROYAML_JOB_LOGS_CA", ""),
+			Address:     valueFromEnv(envJobLogsAddress, ""),
+			Certificate: valueFromEnv(envJobLogsCertificate, ""),
+			PrivateKey:  valueFromEnv(envJobLogsPrivateKey, ""),
+			CA:          valueFromEnv(envJobLogsCA, ""),
 		},
 		GRPCAddress:         valueFromEnv(envGRPCAddress, defaultGRPCAddress),
 		RunnerID:            valueFromEnv(envRunnerID, defaultRunnerID),
