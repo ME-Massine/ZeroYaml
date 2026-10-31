@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,7 +30,7 @@ func TestCLIDockerStreamPreservesStderrBeforeCancellation(t *testing.T) {
 	capture := joblogs.NewCapture(ctx, "job", sink)
 	stderr := cancelAfterWrite{Writer: capture.Writer(joblogs.Stderr), cancel: cancel}
 	err = cliDockerStream(executable)(ctx, io.Discard, stderr, "container")
-	if err == nil || ctx.Err() != context.Canceled {
+	if !errors.Is(err, context.Canceled) || ctx.Err() != context.Canceled {
 		t.Fatalf("follower error = %v, context = %v", err, ctx.Err())
 	}
 	if strings.Contains(err.Error(), "failure diagnostics") {

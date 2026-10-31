@@ -26,6 +26,9 @@ class JobLogRecorder {
 		}
 		// Refuse before the PostgreSQL read: under overload every rejected record
 		// would otherwise still cost a lookup. Admission rechecks capacity.
+		// At capacity, refusal therefore takes precedence over attribution: an
+		// unknown Job, another Runner process, or a terminal Job may see
+		// RESOURCE_EXHAUSTED instead of NOT_FOUND or FAILED_PRECONDITION.
 		if (!logs.hasAdmissionCapacity()) {
 			throw new JobLogCapacityException();
 		}

@@ -279,7 +279,7 @@ func (s *Sandbox) runContainer(
 
 	result := <-wait
 	if followed != nil {
-		s.drainLogs(ctx, executionID, followed, stopFollowing, capture)
+		s.drainLogs(ctx, runCtx, executionID, followed, stopFollowing, capture)
 	}
 	output, err = result.output, result.err
 	if err != nil {
@@ -299,8 +299,13 @@ func (s *Sandbox) runContainer(
 // the terminal status report until spec.Timeout, so the drain is bounded by
 // logDrainBound and output still unread when the bound expires is reported as
 // incomplete.
+//
+// A follower stopped by the execution deadline or a cancellation of runCtx
+// worked as designed: its output is incomplete, but no capture failure is
+// logged, so the warning stays reserved for Docker stream errors.
 func (s *Sandbox) drainLogs(
 	ctx context.Context,
+	runCtx context.Context,
 	executionID string,
 	followed <-chan error,
 	stopFollowing context.CancelFunc,
@@ -320,8 +325,12 @@ func (s *Sandbox) drainLogs(
 			slog.Duration("log_drain_timeout", bound))
 		return
 	}
-	if err != nil {
-		capture.MarkIncomplete()
+	if err == nil {
+		return
+	}
+	capture.MarkIncomplete()
+	stopped := runCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+	if !stopped {
 		s.logger.WarnContext(ctx, "job log capture interrupted", slog.String("execution_id", executionID))
 	}
 }

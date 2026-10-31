@@ -1,13 +1,16 @@
 package io.zeroyaml.controlplane.execution;
 
 import java.time.Instant;
+import java.util.UUID;
 
 import com.google.protobuf.Timestamp;
+import io.zeroyaml.controlplane.domain.job.JobId;
+import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
 import io.zeroyaml.controlplane.runner.RunnerProtocolVersion;
 
 /**
  * Boundary checks shared by every Runner-facing execution RPC, so a fix to
- * protocol or timestamp validation cannot land in only one service. Failures
+ * protocol, identity, or timestamp validation cannot land in only one service. Failures
  * are {@link IllegalArgumentException}s that callers map to
  * {@code INVALID_ARGUMENT}.
  */
@@ -29,6 +32,27 @@ final class RunnerRequestValidation {
 			// this Control Plane does not implement.
 			throw new IllegalArgumentException(
 					"this control plane implements protocol version " + RunnerProtocolVersion.CURRENT);
+		}
+	}
+
+	static JobId toJobId(String jobId) {
+		if (jobId == null || jobId.isBlank()) {
+			throw new IllegalArgumentException("job_id must not be empty");
+		}
+		try {
+			return new JobId(UUID.fromString(jobId));
+		} catch (IllegalArgumentException exception) {
+			// A Runner echoes the identity it was dispatched, so a malformed value
+			// is a caller defect rather than an unknown Job.
+			throw new IllegalArgumentException("job_id must be the dispatched job identity");
+		}
+	}
+
+	static RunnerAssignment toRunnerAssignment(String runnerId, String instanceId) {
+		try {
+			return new RunnerAssignment(runnerId, instanceId);
+		} catch (IllegalArgumentException exception) {
+			throw new IllegalArgumentException("runner_id and instance_id must identify the reporting process");
 		}
 	}
 

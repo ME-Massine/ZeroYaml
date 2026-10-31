@@ -298,15 +298,89 @@ func TestCaptureResetsDeliveryFailuresAfterAcknowledgment(t *testing.T) {
 	}
 }
 
-func TestCaptureStopsDeliveryAfterConsecutiveFailures(t *testing.T) {
+func TestCapturePausesDeliveryAfterConsecutiveFailures(t *testing.T) {
 	sink := &recordingSink{fail: map[uint64]bool{1: true, 2: true}}
 	capture := NewCapture(context.Background(), "stalled", sink)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	capture.now = func() time.Time { return now }
 	capture.Writer(Stderr).Write([]byte("pending on the other stream"))
 	capture.Writer(Stdout).Write(make([]byte, 10*MaxChunkBytes))
 	capture.Close(context.Background(), false)
 	// The pending stderr chunk is dropped without another network call.
 	if len(sink.records) != 3 || sink.records[2].Sequence != 3 || !sink.records[2].EndOfOutput || !sink.records[2].Truncated {
 		t.Fatalf("records = %+v", sink.records)
+	}
+}
+
+func TestCaptureResumesDeliveryAfterCooldown(t *testing.T) {
+	sink := &recordingSink{fail: map[uint64]bool{1: true, 2: true}}
+	capture := NewCapture(context.Background(), "recovered", sink)
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := start
+	capture.now = func() time.Time { return now }
+	chunk := make([]byte, MaxChunkBytes)
+	capture.Writer(Stdout).Write(chunk)
+	capture.Writer(Stdout).Write(chunk)
+	// Output observed during the cooldown is dropped without a network call.
+	now = start.Add(deliveryCooldown - time.Second)
+	capture.Writer(Stdout).Write(chunk)
+	if len(sink.records) != 2 {
+		t.Fatalf("cooldown sent %d records", len(sink.records))
+	}
+	now = start.Add(deliveryCooldown)
+	capture.Writer(Stdout).Write(chunk)
+	capture.Writer(Stdout).Write(chunk)
+	capture.Close(context.Background(), false)
+	if len(sink.records) != 5 {
+		t.Fatalf("delivery did not resume: %d records", len(sink.records))
+	}
+	for i, record := range sink.records {
+		if record.Sequence != uint64(i+1) {
+			t.Fatalf("sequence %d at index %d; drops must not leave gaps", record.Sequence, i)
+		}
+	}
+	if final := sink.records[4]; !final.EndOfOutput || !final.Truncated || !final.Incomplete {
+		t.Fatalf("final = %+v", final)
+	}
+}
+
+func TestPersistentFailureCostsOneCallPerCooldown(t *testing.T) {
+	calls := 0
+	capture := NewCapture(context.Background(), "down", sinkFunc(func(_ context.Context, record Record) error {
+		if !record.EndOfOutput {
+			calls++
+		}
+		return errors.New("ingress unavailable")
+	}))
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := start
+	capture.now = func() time.Time { return now }
+	// One full chunk per second for 95 seconds of a stalled ingress.
+	for second := 0; second < 95; second++ {
+		now = start.Add(time.Duration(second) * time.Second)
+		capture.Writer(Stdout).Write(make([]byte, MaxChunkBytes))
+	}
+	// Two failures arm the cooldown; each probe follows 30 seconds after the
+	// last failure, at 31, 61, and 91 seconds.
+	if calls != 5 {
+		t.Fatalf("data calls = %d, want 5", calls)
+	}
+}
+
+func TestRemainingChunksExcludesDroppedChunks(t *testing.T) {
+	sink := &recordingSink{fail: map[uint64]bool{1: true, 2: true}}
+	capture := NewCapture(context.Background(), "dropped", sink)
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := start
+	capture.now = func() time.Time { return now }
+	capture.Writer(Stderr).Write([]byte("pending"))
+	// Two failed chunks arm the cooldown just before the stderr chunk ages.
+	now = start.Add(maxPendingAge - time.Second)
+	capture.Writer(Stdout).Write(make([]byte, 2*MaxChunkBytes))
+	now = start.Add(maxPendingAge)
+	capture.Writer(Stdout).Write([]byte("x"))
+	if got := capture.RemainingChunks(); got != MaxChunks-3 {
+		t.Fatalf("remaining = %d, want %d", got, MaxChunks-3)
 	}
 }
 

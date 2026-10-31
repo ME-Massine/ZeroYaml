@@ -191,7 +191,13 @@ func cliDockerStream(dockerBinary string) dockerStreamFunc {
 		}
 		cancel()
 		waitErr := command.Wait()
-		if readErr != nil || (waitErr != nil && ctx.Err() != nil) {
+		// A stop by the caller's context is reported as that context error, so
+		// callers can tell an expected stop from a stream failure. Neither error
+		// carries CLI diagnostics or output.
+		if ctx.Err() != nil && (readErr != nil || waitErr != nil) {
+			return fmt.Errorf("docker output stream stopped: %w", ctx.Err())
+		}
+		if readErr != nil {
 			return errors.New("docker output stream failed")
 		}
 		return nil

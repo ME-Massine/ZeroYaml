@@ -858,8 +858,9 @@ not automatically redacted. Job output is read from Docker Engine frames over
 pending 4 KiB buffer per stream, flushed when full, on a write after the pending
 bytes have waited one minute, or at close. A stream switch does not flush, so
 interleaved line output cannot exhaust the chunk budget; cross-stream order is
-kept at chunk granularity. Data delivery stops only after two consecutive
-failures; an acknowledged chunk resets the count. Docker
+kept at chunk granularity. After two consecutive failures, data delivery
+pauses for 30 seconds and then probes with the next chunk; an acknowledged
+chunk resets the count. Docker
 CLI diagnostics remain separate and are discarded. Enabling delivery overrides
 the daemon default log driver for Job containers with bounded readable `local`
 logs; disabled delivery preserves that default and starts no follower. After the

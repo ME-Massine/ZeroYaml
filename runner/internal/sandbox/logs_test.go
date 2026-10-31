@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -308,6 +310,49 @@ func TestLogCloseTimeoutStaysWithinShutdownBudget(t *testing.T) {
 		if got := New("docker", slog.New(slog.DiscardHandler), nil, shutdown).logCloseTimeout; got != want {
 			t.Errorf("log close timeout for %s shutdown = %s, want %s", shutdown, got, want)
 		}
+	}
+}
+
+func TestRunTimeoutStopsFollowerWithoutCaptureWarning(t *testing.T) {
+	docker := newFakeDocker()
+	docker.blockOnWait["job-id"] = true
+	sink := &logSink{}
+	s := newTestSandbox(docker)
+	s.logs = sink
+	var output bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&output, nil))
+	s.stream = func(ctx context.Context, stdout, _ io.Writer, _ string) error {
+		stdout.Write([]byte("partial\n"))
+		<-ctx.Done()
+		return fmt.Errorf("docker output stream stopped: %w", ctx.Err())
+	}
+	spec := testSpec()
+	spec.Timeout = 50 * time.Millisecond
+	if result := s.Run(context.Background(), spec); result.Outcome != OutcomeTimedOut {
+		t.Fatalf("result = %+v", result)
+	}
+	if strings.Contains(output.String(), "job log capture interrupted") {
+		t.Fatalf("expected deadline stop was logged as a capture failure: %s", output.String())
+	}
+	if final := sink.records[len(sink.records)-1]; !final.EndOfOutput || !final.Incomplete {
+		t.Fatalf("final = %+v", final)
+	}
+}
+
+func TestRunStreamFailureStillWarns(t *testing.T) {
+	docker := newFakeDocker()
+	s := newTestSandbox(docker)
+	s.logs = &logSink{}
+	var output bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&output, nil))
+	s.stream = func(context.Context, io.Writer, io.Writer, string) error {
+		return errors.New("docker output stream failed")
+	}
+	if result := s.Run(context.Background(), testSpec()); result.Outcome != OutcomeSucceeded {
+		t.Fatalf("result = %+v", result)
+	}
+	if !strings.Contains(output.String(), "job log capture interrupted") {
+		t.Fatalf("stream failure was not logged: %s", output.String())
 	}
 }
 

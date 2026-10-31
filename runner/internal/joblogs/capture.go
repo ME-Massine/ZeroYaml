@@ -16,16 +16,28 @@ const (
 	MaxChunks      = 256
 )
 
-// maxPendingAge bounds how long slow output waits for a full chunk. It stays
-// well below the Control Plane's five-minute retention idle limit, so a live
-// stream keeps its retained prefix, and high enough to protect the chunk budget:
-// 256 chunks still cover more than two hours of slow output on both streams.
+// maxPendingAge bounds how long pending output waits for a full chunk once more
+// output arrives. Aged output is sent on the next write to either stream; no
+// timer flushes it, so a Job silent for longer than the Control Plane's
+// five-minute retention idle limit may still lose its retained prefix under
+// capacity pressure. The age is high enough to protect the chunk budget: 256
+// chunks still cover more than two hours of slow output on both streams.
 const maxPendingAge = time.Minute
 
-// maxConsecutiveFailures stops data delivery once the ingress has failed this
-// many chunks in a row. A successful acknowledgment resets the count, so
-// isolated failures hours apart never disable delivery for the rest of a Job.
+// maxConsecutiveFailures pauses data delivery once the ingress has failed this
+// many chunks in a row. Any acknowledgment resets the count.
 const maxConsecutiveFailures = 2
+
+// deliveryCooldown is how long data delivery stays paused after
+// maxConsecutiveFailures. Output observed meanwhile, and any pending chunk
+// flushed meanwhile, is dropped without a network call; the first chunk sent
+// after the cooldown is a probe whose success resumes delivery and whose
+// failure pauses it again. A stalled ingress therefore costs at most one call
+// bounded by ZEROYAML_RUNNER_STATUS_REPORT_TIMEOUT (5 seconds by default) per
+// 30 seconds, while transient refusals such as RESOURCE_EXHAUSTED during a
+// retention burst, or a short network interruption, lose only the output
+// observed during one cooldown.
+const deliveryCooldown = 30 * time.Second
 
 // Stream identifies the command output pipe.
 type Stream int
@@ -56,8 +68,10 @@ type Sink interface {
 
 // Capture serializes stdout and stderr observations with bounded memory and
 // no background queue. Slow delivery applies backpressure to the Docker CLI.
-// Failed chunks are not retried; delivery stops after two consecutive failures
-// so a stalled ingress cannot consume the Job deadline one chunk at a time.
+// Failed chunks are not retried. After two consecutive failures, delivery pauses
+// for deliveryCooldown and then probes with the next chunk, so a stalled ingress
+// cannot consume the Job deadline one chunk at a time and a recovered one is
+// used again.
 //
 // Each stream coalesces writes into its own pending chunk, which is sent when
 // full, when a write arrives after it has waited maxPendingAge, or on Close.
@@ -79,6 +93,8 @@ type Capture struct {
 	chunks              int
 	pending             [2]pendingChunk
 	consecutiveFailures int
+	retryAfter          time.Time
+	dropped             int
 	truncated           bool
 	incomplete          bool
 	closed              bool
@@ -143,7 +159,7 @@ func (w streamWriter) Write(p []byte) (int, error) {
 		}
 		// A chunk is counted when it starts, so the pending chunks of both
 		// streams can never exceed the chunk budget once they are sent.
-		if c.consecutiveFailures >= maxConsecutiveFailures || c.bytes == MaxOutputBytes ||
+		if c.coolingDown() || c.bytes == MaxOutputBytes ||
 			(len(pending.content) == 0 && c.chunks == MaxChunks) {
 			c.truncated = true
 			c.mu.Unlock()
@@ -193,8 +209,9 @@ func (c *Capture) pendingByAge() []Stream {
 
 // flush requires the delivery token. A record owns its bytes after delivery;
 // the next pending chunk never reuses them. No state lock spans a Sink call.
-// Once delivery has stopped after consecutive failures, the chunk is dropped
-// without a network call and the output is marked truncated.
+// During a delivery cooldown, the chunk is dropped without a network call and
+// the output is marked truncated. Sequence numbers are assigned only to sent
+// chunks, so they stay contiguous across drops.
 func (c *Capture) flush(ctx context.Context, stream Stream) {
 	pending := &c.pending[stream-1]
 	if len(pending.content) == 0 {
@@ -203,7 +220,8 @@ func (c *Capture) flush(ctx context.Context, stream Stream) {
 	record := Record{JobID: c.jobID, ObservedAt: pending.observedAt, Stream: stream, Content: pending.content}
 	pending.content = nil
 	c.mu.Lock()
-	if c.consecutiveFailures >= maxConsecutiveFailures {
+	if c.coolingDown() {
+		c.dropped++
 		c.truncated = true
 		c.mu.Unlock()
 		return
@@ -221,17 +239,26 @@ func (c *Capture) flush(ctx context.Context, stream Stream) {
 		c.consecutiveFailures++
 		c.incomplete = true
 		c.truncated = true
+		if c.consecutiveFailures >= maxConsecutiveFailures {
+			c.retryAfter = c.now().Add(deliveryCooldown)
+		}
 		return
 	}
 	c.consecutiveFailures = 0
 }
 
+// coolingDown reports whether data delivery is paused. It requires mu.
+func (c *Capture) coolingDown() bool {
+	return c.consecutiveFailures >= maxConsecutiveFailures && c.now().Before(c.retryAfter)
+}
+
 // RemainingChunks reports how many data chunks the capture may still send,
 // including pending ones. It bounds the delivery work left after command exit.
+// Every started chunk is eventually sent, dropped, or still pending.
 func (c *Capture) RemainingChunks() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return MaxChunks - int(c.sequence)
+	return MaxChunks - int(c.sequence) - c.dropped
 }
 
 // MarkIncomplete records a failure in the output source without changing the

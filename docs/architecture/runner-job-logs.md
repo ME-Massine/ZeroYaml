@@ -32,8 +32,11 @@ chunks oldest first byte first, before the final marker, using its detached
 context. No timer or background goroutine flushes idle output, so bytes
 followed by silence wait for the next write or the end of output. The
 one-minute age stays well below the Control Plane's five-minute idle eviction,
-so slow but live output keeps its retained prefix, while 256 chunks still cover
-more than two hours of one-line-per-minute output on both streams.
+so output that keeps arriving at least every few minutes keeps its retained
+prefix, while 256 chunks still cover more than two hours of
+one-line-per-minute output on both streams. Aged output is sent only on the
+next write, so a Job silent for longer than five minutes may still lose its
+retained prefix under capacity pressure.
 Partial lines, binary output, and split UTF-8 sequences
 are preserved. Sequence starts at 1 and increases across both streams in send
 order. `observed_at` is the Runner's UTC observation time of a chunk's first
@@ -55,13 +58,16 @@ Each call has a deadline from
 Slow calls apply bounded backpressure without a background queue. No retries
 are configured. A failed chunk is not retried. Later chunks are still sent after
 a failure, and every acknowledged chunk resets the failure count. After two
-consecutive data delivery failures for the same Job, the Runner drains
-remaining output, including the other stream's pending chunk, without further
-data RPCs so a stalled ingress cannot consume the execution deadline through
-repeated timeouts. Isolated failures, such as `FAILED_PRECONDITION` before the
-running report commits and a network interruption an hour later, therefore
-never disable delivery for the rest of a Job. The final marker is still
-attempted.
+consecutive data delivery failures for the same Job, data delivery pauses for
+30 seconds: output observed meanwhile, including the other stream's pending
+chunk, is dropped without a data RPC and the log is marked `truncated`. The
+first chunk after the pause is a probe. Its success resumes delivery; its
+failure pauses delivery again. A stalled ingress therefore costs at most one
+deadline-bounded call per 30 seconds instead of consuming the execution
+deadline one chunk at a time, while a transient refusal, such as
+`RESOURCE_EXHAUSTED` during a retention burst or a short network interruption,
+loses only the output of one pause. Sequence numbers are assigned only to sent
+chunks, so drops leave no sequence gaps. The final marker is always attempted.
 Once the command has exited, the follower gets a drain bound of ten seconds plus
 100 ms for every data chunk the capture budget still permits, at most 35.6
 seconds. Delivery sends one chunk at a time, so a fixed ten-second bound would
@@ -290,7 +296,8 @@ checks still apply after authentication.
 The normal Runner suite covers both streams, raw bytes, deterministic sequence
 context, concurrent writes, empty output, large output, interleaved line output
 within the chunk budget, the chunk-count limit, failed execution, cancellation,
-capture errors, failure-count reset and consecutive-failure stop, gRPC
+capture errors, failure-count reset, the delivery cooldown and its recovery
+probe, deadline stops without a capture warning, gRPC
 deadlines, age-based flushing of slow output, the budget-scaled drain bound
 after command exit, the shutdown-derived close bound, and payload exclusion
 from operational logs. Control Plane transport tests cover byte

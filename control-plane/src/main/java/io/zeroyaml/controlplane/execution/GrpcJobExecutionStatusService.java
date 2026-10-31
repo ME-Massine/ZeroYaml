@@ -2,7 +2,6 @@ package io.zeroyaml.controlplane.execution;
 
 import java.time.Instant;
 import java.util.Objects;
-import java.util.UUID;
 
 import org.springframework.stereotype.Component;
 
@@ -78,8 +77,8 @@ class GrpcJobExecutionStatusService extends JobExecutionStatusServiceGrpc.JobExe
 	private static JobStatusReport toReport(ReportJobStatusRequest request) {
 		RunnerRequestValidation.requireSupportedProtocolVersion(request.getProtocolVersion());
 
-		var jobId = toJobId(request.getJobId());
-		var reportedBy = toRunnerAssignment(request);
+		var jobId = RunnerRequestValidation.toJobId(request.getJobId());
+		var reportedBy = RunnerRequestValidation.toRunnerAssignment(request.getRunnerId(), request.getInstanceId());
 		var startedAt = RunnerRequestValidation.toRequiredInstant(request.hasStartedAt(), request.getStartedAt(), "started_at");
 
 		return switch (request.getState()) {
@@ -121,27 +120,6 @@ class GrpcJobExecutionStatusService extends JobExecutionStatusServiceGrpc.JobExe
 		}
 
 		return JobStatusReport.running(jobId, reportedBy, startedAt);
-	}
-
-	private static JobId toJobId(String jobId) {
-		if (jobId == null || jobId.isBlank()) {
-			throw new IllegalArgumentException("job_id must not be empty");
-		}
-		try {
-			return new JobId(UUID.fromString(jobId));
-		} catch (IllegalArgumentException exception) {
-			// A Runner echoes the identity it was dispatched, so a malformed value
-			// is a caller defect rather than an unknown Job.
-			throw new IllegalArgumentException("job_id must be the dispatched job identity");
-		}
-	}
-
-	private static RunnerAssignment toRunnerAssignment(ReportJobStatusRequest request) {
-		try {
-			return new RunnerAssignment(request.getRunnerId(), request.getInstanceId());
-		} catch (IllegalArgumentException exception) {
-			throw new IllegalArgumentException("runner_id and instance_id must identify the reporting process");
-		}
 	}
 
 	private static Instant toCompletedAt(ReportJobStatusRequest request) {

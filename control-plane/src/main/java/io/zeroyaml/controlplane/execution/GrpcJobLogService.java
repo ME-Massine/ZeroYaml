@@ -1,7 +1,5 @@
 package io.zeroyaml.controlplane.execution;
 
-import java.util.UUID;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -11,7 +9,6 @@ import io.zeroyaml.contracts.runner.v1.AppendJobLogRequest;
 import io.zeroyaml.contracts.runner.v1.AppendJobLogResponse;
 import io.zeroyaml.contracts.runner.v1.JobLogServiceGrpc;
 import io.zeroyaml.controlplane.domain.job.JobId;
-import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
 
 /** Bounded log ingress registered only on the authenticated TLS listener. */
 class GrpcJobLogService extends JobLogServiceGrpc.JobLogServiceImplBase {
@@ -65,8 +62,8 @@ class GrpcJobLogService extends JobLogServiceGrpc.JobLogServiceImplBase {
 			case JOB_LOG_STREAM_STDERR -> JobLogRecord.Stream.STDERR;
 			case UNRECOGNIZED -> throw new IllegalArgumentException("unknown output stream");
 		};
-		return new JobLogRecord(new JobId(UUID.fromString(request.getJobId())),
-				new RunnerAssignment(request.getRunnerId(), request.getInstanceId()), request.getSequence(),
+		return new JobLogRecord(RunnerRequestValidation.toJobId(request.getJobId()),
+				RunnerRequestValidation.toRunnerAssignment(request.getRunnerId(), request.getInstanceId()), request.getSequence(),
 				observedAt, stream,
 				request.getContent().toByteArray(), request.getEndOfOutput(), request.getTruncated(), request.getIncomplete());
 	}
