@@ -57,8 +57,10 @@ Technology:
 
 Runner job output can be delivered to the Control Plane through a dedicated
 mTLS endpoint with bounded capture and explicit completion metadata. Retained
-output is readable through `GET /api/v1/jobs/{jobId}/logs` once a bearer token
-is configured in `ZEROYAML_JOB_LOGS_READ_TOKEN`. See
+output is readable over HTTPS through `GET /api/v1/jobs/{jobId}/logs` once a bearer
+token is configured in `ZEROYAML_JOB_LOGS_READ_TOKEN`. Enabling the reader also
+requires native HTTP-server TLS and `server.forward-headers-strategy=NONE`;
+proxies must use HTTPS to the Control Plane. See
 [Runner job logs](./docs/architecture/runner-job-logs.md) for configuration,
 ordering, and retention limits.
 

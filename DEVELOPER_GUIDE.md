@@ -851,8 +851,16 @@ loses all logs. `GET /api/v1/jobs/{jobId}/logs` reads retained output; it answer
 `404` while `ZEROYAML_JOB_LOGS_READ_TOKEN` is unset or empty, a whitespace-only
 token fails startup, and every read needs `Authorization: Bearer <token>` of at
 least 32 characters (the scheme name is case-insensitive). There is no UI
-log viewer. Log ingress runs on 8 fixed worker threads with at most 64
-concurrent calls and 8 concurrent streams per connection. Raw command bytes are
+log viewer. Enabling the reader also requires native HTTPS configured through
+`server.ssl` and explicit `server.forward-headers-strategy=NONE`; startup fails
+otherwise. Provision the HTTP server certificate and key outside source control,
+separately from the gRPC log-ingress credentials. Proxies must connect to the
+Control Plane over HTTPS, and clients must use HTTPS from the first request.
+Plaintext reads return `403` before token validation or log lookup, without a
+redirect; forwarded headers cannot establish transport security. See the
+[reader TLS configuration](./docs/architecture/runner-job-logs.md#reading-retained-output)
+for an external configuration example. Log ingress runs on 8 fixed worker
+threads with at most 64 concurrent calls and 8 concurrent streams per connection. Raw command bytes are
 excluded from operational logs; arbitrary secrets printed by a command are
 not automatically redacted. Job output is read from Docker Engine frames over
 `docker system dial-stdio`; stdout and stderr observations are coalesced into one

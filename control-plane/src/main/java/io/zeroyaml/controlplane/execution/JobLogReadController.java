@@ -12,9 +12,12 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.web.server.autoconfigure.ServerProperties;
+import org.springframework.boot.web.server.autoconfigure.ServerProperties.ForwardHeadersStrategy;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -33,6 +36,7 @@ import io.zeroyaml.controlplane.domain.job.JobId;
  * <ul>
  *   <li>{@code 404 Not Found} for every request while no read token is
  *       configured, so a disabled reader is indistinguishable from an absent one;</li>
+ *   <li>{@code 403 Forbidden} for plaintext requests, before checking credentials;</li>
  *   <li>{@code 401 Unauthorized} when the {@code Authorization: Bearer} token is
  *       missing or wrong, before the Job identity is even parsed;</li>
  *   <li>{@code 400 Bad Request} for a malformed Job identity;</li>
@@ -41,7 +45,10 @@ import io.zeroyaml.controlplane.domain.job.JobId;
  *       raw bytes encoded as base64, so binary output and split UTF-8 survive.</li>
  * </ul>
  *
- * <p>The token is compared through SHA-256 digests in constant time, so neither
+ * <p>Enabling the reader requires native HTTPS and explicit disabling of forwarded
+ * headers, so a caller cannot claim an encrypted connection through a header.
+ * TLS-terminating proxies must also use HTTPS to the Control Plane.
+ * The token is compared through SHA-256 digests in constant time, so neither
  * its content nor its length is revealed by timing. Responses are never cached.
  * Output bytes never enter operational logs; reads are logged with the Job
  * identity only. Rejected reads are logged as a count at most once per
@@ -61,8 +68,8 @@ class JobLogReadController {
 	private final AtomicReference<Instant> nextRejectionWarning = new AtomicReference<>(Instant.MIN);
 
 	@Autowired
-	JobLogReadController(JobLogStore logs, JobLogReadProperties properties) {
-		this(logs, properties, Clock.systemUTC());
+	JobLogReadController(JobLogStore logs, JobLogReadProperties properties, ServerProperties server) {
+		this(logs, properties, server, Clock.systemUTC());
 	}
 
 	/**
@@ -71,7 +78,18 @@ class JobLogReadController {
 	 * a second one is not registered here; that would make injection by type
 	 * ambiguous.
 	 */
-	JobLogReadController(JobLogStore logs, JobLogReadProperties properties, Clock clock) {
+	JobLogReadController(JobLogStore logs, JobLogReadProperties properties, ServerProperties server, Clock clock) {
+		if (properties.enabled()) {
+			if (server.getSsl() == null || !server.getSsl().isEnabled()) {
+				throw new IllegalStateException("Job log reading requires HTTPS: configure server.ssl with a certificate "
+						+ "and private key before setting ZEROYAML_JOB_LOGS_READ_TOKEN");
+			}
+			// Cloud deployments can default to NATIVE, so an unset strategy is not sufficient.
+			if (server.getForwardHeadersStrategy() != ForwardHeadersStrategy.NONE) {
+				throw new IllegalStateException("Job log reading requires server.forward-headers-strategy=NONE; "
+						+ "proxies must connect to the Control Plane over HTTPS");
+			}
+		}
 		this.logs = Objects.requireNonNull(logs);
 		this.tokenDigest = properties.enabled() ? sha256(properties.token()) : null;
 		this.clock = Objects.requireNonNull(clock);
@@ -79,9 +97,14 @@ class JobLogReadController {
 
 	@GetMapping(PATH)
 	ResponseEntity<JobLogView> read(@PathVariable String jobId,
-			@RequestHeader(name = HttpHeaders.AUTHORIZATION, required = false) String authorization) {
+			@RequestHeader(name = HttpHeaders.AUTHORIZATION, required = false) String authorization,
+			HttpServletRequest request) {
 		if (tokenDigest == null) {
 			return ResponseEntity.notFound().build();
+		}
+		// Never redirect a credential-bearing request or rely on caller-supplied proxy headers.
+		if (!request.isSecure()) {
+			return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
 		}
 		if (!authorized(authorization)) {
 			recordRejection();

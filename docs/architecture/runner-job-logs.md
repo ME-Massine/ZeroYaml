@@ -253,11 +253,40 @@ smallest viable control while the Control Plane has no user authentication;
 anyone holding it can read every retained log, so store and rotate it like the
 webhook secret. Rotating it means restarting with a new value.
 
+Enabling the reader also requires native HTTPS on the Control Plane's HTTP
+server and explicit `server.forward-headers-strategy=NONE`. Startup fails if
+`server.ssl` is absent or disabled, or the forwarded-header strategy is unset,
+`NATIVE`, or `FRAMEWORK`. An unset strategy is refused because cloud environments
+can otherwise enable header trust implicitly. Provision a trusted HTTP server
+certificate and private key outside source control; these are separate from the
+gRPC log-ingress credentials. For example, place these settings in external Spring
+Boot configuration, alongside a separately supplied read token:
+
+```properties
+server.port=8443
+server.ssl.enabled=true
+server.ssl.certificate=file:/run/zeroyaml/tls/http.crt
+server.ssl.certificate-private-key=file:/run/zeroyaml/tls/http.key
+server.forward-headers-strategy=NONE
+```
+
+Spring Boot also supports keystores and SSL bundles; see its
+[HTTPS configuration guide](https://docs.spring.io/spring-boot/4.0/how-to/webserver.html#howto.webserver.configure-ssl).
+TLS-terminating proxies must re-encrypt their connection to the Control Plane.
+Forwarded headers never authorize plaintext access. Even if a deployment adds a
+plaintext connector, enabled reads on it return an empty `403` before checking
+the bearer token, parsing the Job identity, or consulting retention. The reader
+does not redirect or challenge plaintext requests. Clients must use HTTPS from
+the first request: rejecting a request cannot recover credentials already sent
+in plaintext. No loopback exception exists. An unset read token still disables
+the reader with `404` and leaves local HTTP development available.
+
 | Status | Meaning |
 | --- | --- |
 | `200` | Retained data chunks in sequence order, `Cache-Control: no-store`. |
 | `400` | The Job identity is not a UUID. |
 | `401` | Missing, malformed, or wrong bearer token (`WWW-Authenticate: Bearer`). |
+| `403` | Enabled reader accessed over plaintext, regardless of credentials or forwarded headers. |
 | `404` | Reader disabled, or output unknown, evicted, or not yet received. |
 
 ```json
@@ -384,7 +413,10 @@ the 1 MiB limit, completed-output and idle-stream eviction, active-retention
 saturation without a Job lookup, shared protocol and timestamp validation, the
 concurrent call limit and permit release, including after executor rejection,
 the authenticated read endpoint with case-insensitive scheme matching,
-whitespace-token refusal, and rate-limited rejection warnings,
+whitespace-token refusal, and rate-limited rejection warnings. Reader regressions
+cover startup refusal without native TLS or with forwarded-header trust, real
+HTTPS access with a trusted temporary certificate, and plaintext refusal on an
+additional connector despite forged forwarding headers. Tests also cover
 immutable snapshots, retained output of failed Jobs, and refused admission for
 terminal Jobs, including after a finished stream was evicted. Regression tests also cover independent
 host clocks, sequence gaps after loss, cancellation of blocked delivery,
