@@ -60,8 +60,10 @@ are configured. A failed chunk is not retried. Later chunks are still sent after
 a failure, and every acknowledged chunk resets the failure count. After two
 consecutive data delivery failures for the same Job, data delivery pauses for
 30 seconds: output observed meanwhile, including the other stream's pending
-chunk, is dropped without a data RPC and the log is marked `truncated`. The
-first chunk after the pause is a probe. Its success resumes delivery; its
+chunk, is dropped without a data RPC and the log is marked `truncated`. A
+stream that lost output during the pause sends its pending chunk before its
+next bytes start a new one, so no record joins output from before and after
+the gap. The first chunk after the pause is a probe. Its success resumes delivery; its
 failure pauses delivery again. A stalled ingress therefore costs at most one
 deadline-bounded call per 30 seconds instead of consuming the execution
 deadline one chunk at a time, while a transient refusal, such as
@@ -69,20 +71,23 @@ deadline one chunk at a time, while a transient refusal, such as
 loses only the output of one pause. A send cancelled by the Runner itself (the
 drain bound, a Job timeout, or a cancellation) is lost but not counted as a
 failure, because it says nothing about the ingress; otherwise it could start a
-pause that drops the pending chunks Close is meant to send. A call that exceeds
-its own deadline still counts. Sequence numbers are assigned only to sent
-chunks, so drops leave no sequence gaps. The final marker is always attempted.
-Once the command has exited, the follower gets a drain bound of ten seconds plus
-100 ms for every data chunk the capture budget still permits, at most 35.6
-seconds. Delivery sends one chunk at a time, so a fixed ten-second bound would
-cut the tail of a fast command with a large backlog (1 MiB at 50 ms round-trip
-time needs about 12.8 seconds). The remaining budget is the largest backlog
-delivery can still acknowledge, and the bound shrinks as it is spent. Slow but
-successful delivery would otherwise hold the container, the concurrency slot,
-and the terminal status report until the execution deadline. When the bound
-expires, the sandbox cancels in-flight and later data delivery, stops the
-follower, and marks the output `incomplete`; pending bytes and the final marker
-are still sent by Close.
+pause that drops the pending chunks Close is meant to send. Such a send is
+logged at debug level only, not as a delivery failure. A call that exceeds
+its own deadline still counts and still warns. Sequence numbers are assigned only to sent
+chunks, so drops leave no sequence gaps. Once the Job container start was
+attempted, the final marker is always attempted.
+Once the command has exited, the follower gets a fixed drain bound of 35
+seconds. Delivery sends one chunk at a time; the bound fits a full 1 MiB backlog
+at about 136 ms per acknowledgment. Following stops as soon as the 1 MiB or
+256-chunk budget discards output, so the bound only matters while delivery is
+slow. Slow but successful delivery would otherwise hold the container, the
+concurrency slot, and the terminal status report until the execution deadline.
+When the bound expires, the sandbox cancels in-flight and later data delivery,
+stops the follower, and marks the output `incomplete`; pending bytes and the
+final marker are still sent by Close. When `docker wait` fails without an
+observed exit, the container may still be running, so the follower is stopped
+the same way at once instead of waiting for the drain bound; the wait error is
+the reported execution failure.
 The final marker sets both `incomplete` and `truncated` when a data delivery was
 not acknowledged; that chunk may have been retained if only its response was
 lost. Sequence gaps describe missing observations without poisoning later calls.
@@ -98,11 +103,16 @@ no stream, before the dispatcher reports terminal execution status:
 | Marker | Meaning |
 | --- | --- |
 | `truncated` | Capture exceeded 1 MiB or 256 chunks, or a data delivery was not acknowledged. |
-| `incomplete` | Capture/delivery failed, or execution was cancelled, timed out, or could not execute. |
-| No final marker | Output completeness is unknown; the Runner or transport may have stopped. |
+| `incomplete` | Capture/delivery failed, or execution was cancelled, timed out, or could not execute after the Job container start was attempted. |
+| No final marker | The Job container was never started, or output completeness is unknown because the Runner or transport stopped. |
 
 Non-zero command exit alone does not make output incomplete. An empty command
-output still has a final marker. Final delivery uses a detached context, so
+output still has a final marker. When execution ends before the Job container
+start is attempted (workspace creation, checkout, or Job container creation
+failed, or the execution was stopped first), no command output can exist, so no
+record is sent: the reader answers `404` and no retention slot is used. The
+terminal status report carries the failure. A failed start still gets a final
+marker, because the command may have run. Final delivery uses a detached context, so
 cancellation can still be reported, and every call keeps its own timeout. The
 whole close (at most the two pending chunks and the final marker) has one
 overall bound of five seconds, including after a Job timeout; without it, a slow
@@ -112,7 +122,7 @@ slow chunk send cannot leave the final marker without time to be delivered; a
 chunk cut off by that share is lost, and the marker reports the output as
 incomplete and truncated. The marker stays last because the Control Plane
 refuses records after a final marker. Output delivery after command exit
-therefore takes at most 35.6 + 5 = 40.6 seconds.
+therefore takes at most 35 + 5 = 40 seconds, excluding container cleanup.
 When dispatch is cancelled, the close is instead bounded by one second or a
 fifth of `ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT`, whichever is shorter, to reserve
 shutdown time for terminal status reporting after cleanup.
@@ -129,26 +139,34 @@ frame buffer in Runner memory, alongside fixed CLI pipe buffers. A chunk counts
 against the budget when it starts, so both streams' pending chunks always fit.
 The combined stdout/stderr byte budget is 1 MiB. Short writes and stream
 switches share chunks; only age-based flushes of slow output spend partial
-chunks. When delivery is
+chunks. Once the budget discards output, the capture writer returns
+`joblogs.ErrOutputLimit` and the follower stops reading, so output beyond the
+budget costs no further Engine stream reads or delivery handshakes. The
+container writes to its log driver rather than to the follower, so stopping
+never blocks the command. When delivery is
 enabled, the Runner overrides the daemon default with the `local` Job log driver
 to provide readable, bounded Engine logs, with `max-size=10m`
-and `max-file=1` (compression disabled, as required for a single file); its
-buffer is deleted with the container. A command that emits
-more than that buffer before following starts may lose its earliest bytes;
-capture retains the first bytes observed by the follower and marks budget
-overflow as truncated.
+and `max-file=2`, compression disabled; its files are deleted with the
+container, and use at most 20 MB of daemon disk per Job. The second file keeps
+the rotated file readable for a follower held back by delivery backpressure; a
+single file is replaced in place on rotation. A command that emits more than
+that buffer before following starts may lose its earliest bytes. Capture marks
+only its own budget overflow and delivery loss as `truncated`; such a
+daemon-side loss is not detected or flagged.
 
-Rotation while following is also a best-effort boundary: a follower delayed by
-delivery backpressure may fall behind the retained file. The Engine stream has
+Rotation while following is therefore a best-effort boundary: a follower delayed by
+delivery backpressure may still fall behind the retained files. The Engine stream has
 no source byte offsets, so capture cannot detect a daemon-side gap or mark it
 `incomplete`/`truncated` unless a separate capture limit or error occurs. Those
 flags describe observed capture and delivery, not guaranteed lossless Docker
-retention. `TestDockerLogRotationWithBlockedFollower` pauses the reader before
+retention. Because following stops once the 1 MiB budget is spent, a loss can
+only affect output the follower had not read by then. `TestDockerLogRotationWithBlockedFollower` pauses the reader before
 releasing a container to emit 32 MiB through the production `local` options,
-waits for exit, then resumes the reader. On Docker Engine 29.8.2 (2026-10-29),
-all 33,554,442 generated bytes were observed with no follower error: the proposed
-mid-stream loss was not reproduced. This result does not guarantee behavior
-across daemon versions or other backpressure schedules.
+waits for exit, then resumes the reader. On Docker Engine 29.8.2, all
+33,554,442 generated bytes were observed with no follower error, both with a
+single file (2026-10-29) and with the current two files (2026-11-01): the
+proposed mid-stream loss was not reproduced. This result does not guarantee
+behavior across daemon versions or other backpressure schedules.
 
 The Control Plane checks field bounds (including a 256-character maximum per
 Runner identity field), protobuf timestamp validity, the
@@ -245,7 +263,10 @@ concatenate each stream's decoded bytes before decoding text. `endOfOutput` is
 false while the Job runs or when its final marker was lost; `truncated` and
 `incomplete` are then `null` because completeness is unknown. A response holds at
 most 1 MiB of output. Reads are logged with the Job identity and record count,
-never with content.
+never with content. Rejected reads are counted and logged as one warning at
+most once per minute, so unauthenticated callers cannot grow the operational
+log without bound; the warning carries the number of rejections since the
+previous one and never the presented credential.
 
 Output can contain secrets deliberately printed by user commands. No automatic
 redaction is claimed. Payloads are carried only in the log contract and never
@@ -334,18 +355,22 @@ The normal Runner suite covers both streams, raw bytes, deterministic sequence
 context, concurrent writes, empty output, large output, interleaved line output
 within the chunk budget, the chunk-count limit, failed execution, cancellation,
 capture errors, failure-count reset, the delivery cooldown and its recovery
-probe, locally cancelled sends that do not start a cooldown, deadline stops
+probe, separate chunks on each side of a cooldown gap, locally cancelled sends
+that do not start a cooldown or log a delivery warning, deadline stops
 without a capture warning, gRPC
-deadlines, age-based flushing of slow output, the budget-scaled drain bound
-after command exit, the close bound on completed, timed-out, and cancelled
+deadlines, age-based flushing of slow output, the drain bound
+after command exit, a failed `docker wait` that stops the follower without
+waiting for that bound, the follower stopping once the capture budget is spent,
+no final marker before the Job container starts, an allocation-free write into
+a pending chunk, the close bound on completed, timed-out, and cancelled
 executions, the final-marker reserve when a pending chunk send stalls, log endpoint validation at configuration load, and payload exclusion
 from operational logs. Control Plane transport tests cover byte
 fidelity, assignment validation, sequence rules, timestamp and payload bounds,
 the 1 MiB limit, completed-output and idle-stream eviction, active-retention
 saturation without a Job lookup, shared protocol and timestamp validation, the
 concurrent call limit and permit release, including after executor rejection,
-the authenticated read endpoint with case-insensitive scheme matching and
-whitespace-token refusal,
+the authenticated read endpoint with case-insensitive scheme matching,
+whitespace-token refusal, and rate-limited rejection warnings,
 immutable snapshots, retained output of failed Jobs, and refused admission for
 terminal Jobs, including after a finished stream was evicted. Regression tests also cover independent
 host clocks, sequence gaps after loss, cancellation of blocked delivery,

@@ -51,13 +51,17 @@ func TestCapturePreservesStreamsRawBytesAndObservationSequence(t *testing.T) {
 	}
 }
 
-func TestCaptureBoundsLargeOutputAndContinuesDraining(t *testing.T) {
+func TestCaptureBoundsLargeOutputAndReportsTheLimit(t *testing.T) {
 	sink := &recordingSink{}
 	capture := NewCapture(context.Background(), "large-job", sink)
 	input := bytes.Repeat([]byte("x"), MaxOutputBytes*3)
 	n, err := capture.Writer(Stdout).Write(input)
-	if n != len(input) || err != nil {
+	if n != len(input) || !errors.Is(err, ErrOutputLimit) {
 		t.Fatalf("write = %d, %v", n, err)
+	}
+	// A spent budget stays spent, so a follower may stop reading either stream.
+	if n, err := capture.Writer(Stderr).Write([]byte("late")); n != 4 || !errors.Is(err, ErrOutputLimit) {
+		t.Fatalf("write after the limit = %d, %v", n, err)
 	}
 	capture.Close(context.Background(), false)
 	if len(sink.records) != MaxChunks+1 {
@@ -70,8 +74,27 @@ func TestCaptureBoundsLargeOutputAndContinuesDraining(t *testing.T) {
 		}
 		total += len(record.Content)
 	}
-	if total != MaxOutputBytes || !sink.records[MaxChunks].Truncated {
+	if total != MaxOutputBytes || !sink.records[MaxChunks].Truncated || sink.records[MaxChunks].Incomplete {
 		t.Fatal("output budget or truncation lost")
+	}
+}
+
+func TestCaptureWritesWithinTheBudgetReportNoError(t *testing.T) {
+	capture := NewCapture(context.Background(), "exact", &recordingSink{})
+	// Filling the budget exactly discards nothing.
+	if n, err := capture.Writer(Stdout).Write(make([]byte, MaxOutputBytes)); n != MaxOutputBytes || err != nil {
+		t.Fatalf("write = %d, %v", n, err)
+	}
+}
+
+func TestCaptureWriteIntoPendingChunkDoesNotAllocate(t *testing.T) {
+	capture := NewCapture(context.Background(), "hot-path", &recordingSink{})
+	stdout, stderr := capture.Writer(Stdout), capture.Writer(Stderr)
+	stdout.Write([]byte("x"))
+	stderr.Write([]byte("x"))
+	line := []byte("y")
+	if allocs := testing.AllocsPerRun(100, func() { stdout.Write(line) }); allocs != 0 {
+		t.Fatalf("write into a pending chunk allocated %.0f times", allocs)
 	}
 }
 
@@ -421,28 +444,32 @@ func TestPersistentFailureCostsOneCallPerCooldown(t *testing.T) {
 	}
 }
 
-func TestRemainingChunksExcludesDroppedChunks(t *testing.T) {
+func TestCooldownGapIsNotHiddenInsideOneChunk(t *testing.T) {
 	sink := &recordingSink{fail: map[uint64]bool{1: true, 2: true}}
-	capture := NewCapture(context.Background(), "dropped", sink)
+	capture := NewCapture(context.Background(), "gap", sink)
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	now := start
 	capture.now = func() time.Time { return now }
-	capture.Writer(Stderr).Write([]byte("pending"))
-	// Two failed chunks arm the cooldown just before the stderr chunk ages.
-	now = start.Add(maxPendingAge - time.Second)
-	capture.Writer(Stdout).Write(make([]byte, 2*MaxChunkBytes))
-	now = start.Add(maxPendingAge)
-	capture.Writer(Stdout).Write([]byte("x"))
-	if got := capture.RemainingChunks(); got != MaxChunks-3 {
-		t.Fatalf("remaining = %d, want %d", got, MaxChunks-3)
+	capture.Writer(Stdout).Write([]byte("step 1\n"))
+	// Two failed stderr chunks start the cooldown while stdout is pending.
+	capture.Writer(Stderr).Write(make([]byte, 2*MaxChunkBytes))
+	now = start.Add(time.Second)
+	if _, err := capture.Writer(Stdout).Write([]byte("step 2\n")); err != nil {
+		t.Fatalf("a cooldown drop is not a budget limit: %v", err)
 	}
-}
-
-func TestRemainingChunksCountsUnsentChunks(t *testing.T) {
-	capture := NewCapture(context.Background(), "remaining", &recordingSink{})
-	capture.Writer(Stdout).Write(make([]byte, 3*MaxChunkBytes+1))
-	if got := capture.RemainingChunks(); got != MaxChunks-3 {
-		t.Fatalf("remaining = %d, want %d", got, MaxChunks-3)
+	now = start.Add(deliveryCooldown + 10*time.Second)
+	capture.Writer(Stdout).Write([]byte("step 51\n"))
+	capture.Close(context.Background(), false)
+	if len(sink.records) != 5 {
+		t.Fatalf("records = %+v", sink.records)
+	}
+	before, after := sink.records[2], sink.records[3]
+	if string(before.Content) != "step 1\n" || !before.ObservedAt.Equal(start) ||
+		string(after.Content) != "step 51\n" || !after.ObservedAt.Equal(now) {
+		t.Fatalf("output before and after the gap shares a chunk: %q then %q", before.Content, after.Content)
+	}
+	if final := sink.records[4]; !final.EndOfOutput || !final.Truncated {
+		t.Fatalf("final = %+v", final)
 	}
 }
 

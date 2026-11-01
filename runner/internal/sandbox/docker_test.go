@@ -13,7 +13,7 @@ func TestJobLogDriverOnlyOverriddenWhenDeliveryEnabled(t *testing.T) {
 	}
 	enabled := jobCreateArgs(testSpec(), names, true)
 	assertOption(t, enabled, "--log-driver", "local")
-	for _, option := range []string{"max-size=10m", "max-file=1", "compress=false"} {
+	for _, option := range []string{"max-size=10m", "max-file=2", "compress=false"} {
 		assertOption(t, enabled, "--log-opt", option)
 	}
 }

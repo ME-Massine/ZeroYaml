@@ -40,7 +40,7 @@ func TestJobCreateArgsPassTheCommandAndWorkingDirectoryExplicitly(t *testing.T) 
 	assertOption(t, options, "--pull", "missing")
 	assertOption(t, options, "--log-driver", "local")
 	assertOption(t, options, "--log-opt", "max-size=10m")
-	assertOption(t, options, "--log-opt", "max-file=1")
+	assertOption(t, options, "--log-opt", "max-file=2")
 	assertOption(t, options, "--log-opt", "compress=false")
 
 	if slices.Contains(options, "--privileged") {

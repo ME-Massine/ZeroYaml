@@ -120,7 +120,7 @@ func TestCommandExitWinsWhenLogDeliveryReachesExecutionDeadline(t *testing.T) {
 	}
 	capture := joblogs.NewCapture(runCtx, "job", sink)
 	id := newResourceNames(testExecutionID)
-	code, err := s.runContainer(context.Background(), runCtx, testExecutionID, id.job, jobCreateArgs(testSpec(), id, true), capture)
+	code, err := s.runContainer(context.Background(), runCtx, testExecutionID, id.job, jobCreateArgs(testSpec(), id, true), &jobOutput{capture: capture})
 	if err != nil || code != 0 {
 		t.Fatalf("command exit = %d, %v", code, err)
 	}
@@ -275,7 +275,6 @@ func TestRunBoundsLogDrainAfterCommandExit(t *testing.T) {
 	s := newTestSandbox(docker)
 	s.logs = sink
 	s.logDrainTimeout = 50 * time.Millisecond
-	s.logDrainPerChunk = time.Millisecond
 	s.stream = func(ctx context.Context, stdout, _ io.Writer, _ string) error {
 		for ctx.Err() == nil {
 			stdout.Write(make([]byte, joblogs.MaxChunkBytes))
@@ -284,7 +283,7 @@ func TestRunBoundsLogDrainAfterCommandExit(t *testing.T) {
 	}
 	started := time.Now()
 	result := s.Run(context.Background(), testSpec())
-	if elapsed := time.Since(started); elapsed > s.logDrainBound(joblogs.MaxChunks)+time.Second {
+	if elapsed := time.Since(started); elapsed > s.logDrainTimeout+time.Second {
 		t.Fatalf("Run took %s; slow log delivery was not bounded after command exit", elapsed)
 	}
 	if result.Outcome != OutcomeFailed || result.ExitCode == nil || *result.ExitCode != 3 {
@@ -299,37 +298,98 @@ func TestRunBoundsLogDrainAfterCommandExit(t *testing.T) {
 	docker.assertCleanedUp(t, "checkout-id", "job-id")
 }
 
-func TestRunDrainBoundGrowsWithRemainingChunkBudget(t *testing.T) {
-	docker := newFakeDocker()
-	sink := &slowLogSink{delay: 20 * time.Millisecond}
-	s := newTestSandbox(docker)
-	s.logs = sink
-	// Twenty acknowledgments take longer than the base bound alone.
-	s.logDrainTimeout = 50 * time.Millisecond
-	s.logDrainPerChunk = 20 * time.Millisecond
-	s.stream = func(_ context.Context, stdout, _ io.Writer, _ string) error {
-		_, err := stdout.Write(make([]byte, 20*joblogs.MaxChunkBytes))
-		return err
-	}
-	if result := s.Run(context.Background(), testSpec()); result.Outcome != OutcomeSucceeded {
-		t.Fatalf("result = %+v", result)
-	}
-	sink.mu.Lock()
-	defer sink.mu.Unlock()
-	final := sink.records[len(sink.records)-1]
-	if len(sink.records) != 21 || !final.EndOfOutput || final.Incomplete || final.Truncated {
-		t.Fatalf("backlog tail lost: %d records, final = %+v", len(sink.records), final)
+func TestLogDeliveryAfterCommandExitIsBoundedToFortySeconds(t *testing.T) {
+	s := newTestSandbox(newFakeDocker())
+	// The documented post-exit bound is the drain plus the final flush.
+	if got := s.logDrainTimeout + s.logFinalTimeout; got != 40*time.Second {
+		t.Fatalf("post-exit log delivery bound = %s, want 40s", got)
 	}
 }
 
-func TestLogDrainBoundCoversFullBacklogAtDefaultAllowance(t *testing.T) {
-	s := newTestSandbox(newFakeDocker())
-	if got, want := s.logDrainBound(joblogs.MaxChunks), 35600*time.Millisecond; got != want {
-		t.Fatalf("full-budget drain bound = %s, want %s", got, want)
+func TestRunWaitFailureStopsFollowerWithoutWaitingForDrainBound(t *testing.T) {
+	docker := newFakeDocker()
+	sink := &logSink{}
+	s := newTestSandbox(docker)
+	s.logs = sink
+	s.logDrainTimeout = time.Hour
+	var output bytes.Buffer
+	s.logger = slog.New(slog.NewTextHandler(&output, nil))
+	written := make(chan struct{})
+	s.docker = func(ctx context.Context, args ...string) (string, error) {
+		if args[0] == "wait" && args[1] == "job-id" {
+			<-written
+			return "", errors.New("docker wait: exit status 1: error during connect")
+		}
+		return docker.run(ctx, args...)
 	}
-	if got := s.logDrainBound(0); got != defaultLogDrainTimeout {
-		t.Fatalf("exhausted-budget drain bound = %s", got)
+	// The container is still running, so its follower only ends when stopped.
+	s.stream = func(ctx context.Context, stdout, _ io.Writer, _ string) error {
+		stdout.Write([]byte("still running\n"))
+		close(written)
+		<-ctx.Done()
+		return fmt.Errorf("docker output stream stopped: %w", ctx.Err())
 	}
+	result := make(chan Result, 1)
+	go func() { result <- s.Run(context.Background(), testSpec()) }()
+	select {
+	case got := <-result:
+		if got.Outcome != OutcomeExecutionError || !strings.Contains(got.Message, "error during connect") {
+			t.Fatalf("result = %+v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a failed wait waited for the log drain bound")
+	}
+	if strings.Contains(output.String(), "job log drain exceeded its bound") || strings.Contains(output.String(), "job log capture interrupted") {
+		t.Fatalf("expected follower stop was logged as a log failure: %s", output.String())
+	}
+	if len(sink.records) != 2 || string(sink.records[0].Content) != "still running\n" || !sink.records[1].EndOfOutput || !sink.records[1].Incomplete {
+		t.Fatalf("records = %+v", sink.records)
+	}
+	docker.assertCleanedUp(t, "checkout-id", "job-id")
+}
+
+func TestRunSendsNoFinalMarkerBeforeTheJobContainerStarts(t *testing.T) {
+	for name, configure := range map[string]func(*fakeDocker){
+		"workspace failure": func(d *fakeDocker) { d.failures["volume create"] = errors.New("docker volume: exit status 1") },
+		"checkout failure":  func(d *fakeDocker) { d.exitCodes["checkout-id"] = "128" },
+		"job create failure": func(d *fakeDocker) {
+			d.failures["create zeroyaml-"+testExecutionID+"-job"] = errors.New("docker create: exit status 1")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			docker := newFakeDocker()
+			configure(docker)
+			sink := &logSink{}
+			s := newTestSandbox(docker)
+			s.logs = sink
+			s.stream = func(context.Context, io.Writer, io.Writer, string) error {
+				t.Error("follower started without a Job container")
+				return nil
+			}
+			if result := s.Run(context.Background(), testSpec()); result.Outcome != OutcomeExecutionError {
+				t.Fatalf("result = %+v", result)
+			}
+			if len(sink.records) != 0 {
+				t.Fatalf("records for a command that never ran = %+v", sink.records)
+			}
+		})
+	}
+}
+
+func TestRunMarksOutputIncompleteWhenTheJobContainerStartFails(t *testing.T) {
+	docker := newFakeDocker()
+	docker.failures["start job-id"] = errors.New("docker start: exit status 1")
+	sink := &logSink{}
+	s := newTestSandbox(docker)
+	s.logs = sink
+	if result := s.Run(context.Background(), testSpec()); result.Outcome != OutcomeExecutionError {
+		t.Fatalf("result = %+v", result)
+	}
+	// A failed start may still have run the command, so completeness is reported.
+	if len(sink.records) != 1 || !sink.records[0].EndOfOutput || !sink.records[0].Incomplete {
+		t.Fatalf("records = %+v", sink.records)
+	}
+	docker.assertCleanedUp(t, "checkout-id", "job-id")
 }
 
 func TestLogCloseTimeoutStaysWithinShutdownBudget(t *testing.T) {

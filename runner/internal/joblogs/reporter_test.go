@@ -98,3 +98,28 @@ func TestReporterBoundsStalledCallsAndHonorsCancellation(t *testing.T) {
 		t.Fatalf("cancel error = %v", err)
 	}
 }
+
+func TestReporterWarnsOnlyForSendsTheRunnerDidNotStop(t *testing.T) {
+	var logs bytes.Buffer
+	reporter := testReporter(t, logService{append: func(ctx context.Context, _ *runnerv1.AppendJobLogRequest) (*runnerv1.AppendJobLogResponse, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}, &logs)
+	reporter.timeout = 50 * time.Millisecond
+	// A Runner-side stop, such as a drain bound or the Job deadline, ends ctx.
+	stopped, stop := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer stop()
+	if err := reporter.Append(stopped, Record{JobID: "stopped", ObservedAt: time.Now()}); err == nil {
+		t.Fatal("stopped send succeeded")
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("a Runner-side stop was logged as a delivery failure: %s", logs.String())
+	}
+	// The call's own deadline expiring is an ingress fault and still warns.
+	if err := reporter.Append(context.Background(), Record{JobID: "slow", ObservedAt: time.Now()}); status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("deadline error = %v", err)
+	}
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "job log delivery failed") {
+		t.Fatalf("ingress timeout was not logged: %s", logs.String())
+	}
+}

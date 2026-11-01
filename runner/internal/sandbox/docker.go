@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MohamedMBG/ZeroYaml/runner/internal/joblogs"
 )
 
 const (
@@ -125,9 +127,12 @@ func checkoutCreateArgs(spec Spec, names resourceNames) []string {
 func jobCreateArgs(spec Spec, names resourceNames, captureLogs bool) []string {
 	args := containerCreateArgs(names.job, names, spec.Limits)
 	if captureLogs {
-		// Readable, bounded local logs are required by the Engine follower.
+		// Readable, bounded local logs are required by the Engine follower. A
+		// second file keeps the rotated file readable for a follower held back
+		// by delivery; a single file is replaced in place on rotation.
+		// Compression is off, so following a rotated file needs no decompression.
 		args = append(args, "--log-driver", "local", "--log-opt", "max-size=10m",
-			"--log-opt", "max-file=1", "--log-opt", "compress=false")
+			"--log-opt", "max-file=2", "--log-opt", "compress=false")
 	}
 	args = append(
 		args,
@@ -184,6 +189,12 @@ func cliDockerStream(dockerBinary string) dockerStreamFunc {
 				readErr = errors.New("docker log request failed")
 			} else {
 				readErr = copyDockerLogFrames(response.Body, stdout, stderr)
+				if errors.Is(readErr, joblogs.ErrOutputLimit) {
+					// Nothing more can be retained, so following ends early. The
+					// container writes to its log driver, not to this reader, so
+					// stopping never blocks the command.
+					readErr = nil
+				}
 			}
 			// A malformed frame must not leave Close draining an open response.
 			cancel()

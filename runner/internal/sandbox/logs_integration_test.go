@@ -16,7 +16,7 @@ import (
 
 // TestDockerLogRotationWithBlockedFollower measures daemon-side loss without a
 // capture budget masking it. Gates, rather than sleeps, keep the reader paused
-// while the container exceeds the configured single-file rotation bound.
+// while the container exceeds the configured two-file rotation bound.
 func TestDockerLogRotationWithBlockedFollower(t *testing.T) {
 	if os.Getenv(dockerTestsVariable) != "1" {
 		t.Skipf("set %s=1 to start real containers", dockerTestsVariable)
@@ -38,7 +38,7 @@ func TestDockerLogRotationWithBlockedFollower(t *testing.T) {
 	}()
 	const generated = 32 << 20
 	if _, err := docker(ctx, "create", "--name", names.job, "--label", managedLabel,
-		"--log-driver", "local", "--log-opt", "max-size=10m", "--log-opt", "max-file=1",
+		"--log-driver", "local", "--log-opt", "max-size=10m", "--log-opt", "max-file=2",
 		"--log-opt", "compress=false", "alpine:3.22", "sh", "-c",
 		"mkfifo /tmp/gate; printf 'start\\n'; read gate < /tmp/gate; head -c 33554432 /dev/zero; printf tail"); err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func TestDockerLogRotationWithBlockedFollower(t *testing.T) {
 	if writer.bytes > want {
 		t.Fatalf("observed %d bytes, generated %d", writer.bytes, want)
 	}
-	t.Logf("single-file local rotation: generated=%d observed=%d missing=%d; follower returned no error", want, writer.bytes, want-writer.bytes)
+	t.Logf("two-file local rotation: generated=%d observed=%d missing=%d; follower returned no error", want, writer.bytes, want-writer.bytes)
 }
 
 type rotationGateWriter struct {
@@ -153,7 +153,7 @@ func TestDockerExecutionLogCapture(t *testing.T) {
 			spec.Command = []string{"sh", "-c", scenario.command}
 			spec.WorkingDirectory = "/workspace"
 			capture := joblogs.NewCapture(ctx, spec.JobID, sink)
-			code, err := s.runContainer(ctx, ctx, id, names.job, jobCreateArgs(spec, names, true), capture)
+			code, err := s.runContainer(ctx, ctx, id, names.job, jobCreateArgs(spec, names, true), &jobOutput{capture: capture})
 			if closeErr := capture.Close(context.Background(), ctx.Err() != nil); closeErr != nil {
 				t.Fatal(closeErr)
 			}

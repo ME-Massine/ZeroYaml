@@ -10,10 +10,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.Base64;
 
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -25,6 +30,10 @@ import org.springframework.http.HttpStatus;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import io.zeroyaml.controlplane.domain.job.JobId;
 import io.zeroyaml.controlplane.domain.job.RunnerAssignment;
 
@@ -94,6 +103,32 @@ class JobLogReadControllerTest {
 	}
 
 	@Test
+	void summarizesRejectedReadsAtMostOncePerInterval() {
+		var clock = new SteppingClock(OBSERVED);
+		var reader = new JobLogReadController(new InMemoryJobLogStore(), new JobLogReadProperties(TOKEN), clock);
+		var logger = (Logger) LoggerFactory.getLogger(JobLogReadController.class);
+		var appender = new ListAppender<ILoggingEvent>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			for (int attempt = 0; attempt < 100; attempt++) {
+				assertEquals(HttpStatus.UNAUTHORIZED, reader.read(JobId.newId().value().toString(), null).getStatusCode());
+			}
+			assertEquals(1, appender.list.size());
+			clock.advance(JobLogReadController.REJECTION_WARNING_INTERVAL);
+			assertEquals(HttpStatus.UNAUTHORIZED, reader.read("not-a-job-id", "Bearer wrong").getStatusCode());
+			assertEquals(2, appender.list.size());
+			var summary = appender.list.getLast();
+			assertEquals(Level.WARN, summary.getLevel());
+			assertEquals("Rejected unauthenticated Job log reads: 100 since the previous warning", summary.getFormattedMessage());
+			assertFalse(summary.getFormattedMessage().contains("wrong"));
+		} finally {
+			logger.detachAppender(appender);
+			appender.stop();
+		}
+	}
+
+	@Test
 	void matchesTheBearerSchemeCaseInsensitively() throws Exception {
 		var job = JobId.newId();
 		logs.append(chunk(job, 1, JobLogRecord.Stream.STDOUT, new byte[] { 'x' }));
@@ -144,6 +179,34 @@ class JobLogReadControllerTest {
 
 	private static JobLogRecord chunk(JobId job, long sequence, JobLogRecord.Stream stream, byte[] content) {
 		return new JobLogRecord(job, RUNNER, sequence, OBSERVED, stream, content, false, false, false);
+	}
+
+	/** A clock that moves only when the test advances it. */
+	private static final class SteppingClock extends Clock {
+		private Instant now;
+
+		SteppingClock(Instant start) {
+			this.now = start;
+		}
+
+		void advance(Duration duration) {
+			now = now.plus(duration);
+		}
+
+		@Override
+		public Instant instant() {
+			return now;
+		}
+
+		@Override
+		public ZoneId getZone() {
+			return ZoneOffset.UTC;
+		}
+
+		@Override
+		public Clock withZone(ZoneId zone) {
+			throw new UnsupportedOperationException("the test clock stays in UTC");
+		}
 	}
 
 	@TestConfiguration

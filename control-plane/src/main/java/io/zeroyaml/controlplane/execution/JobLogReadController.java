@@ -3,13 +3,18 @@ package io.zeroyaml.controlplane.execution;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -39,19 +44,37 @@ import io.zeroyaml.controlplane.domain.job.JobId;
  * <p>The token is compared through SHA-256 digests in constant time, so neither
  * its content nor its length is revealed by timing. Responses are never cached.
  * Output bytes never enter operational logs; reads are logged with the Job
- * identity only.</p>
+ * identity only. Rejected reads are logged as a count at most once per
+ * {@link #REJECTION_WARNING_INTERVAL}, so unauthenticated callers cannot grow
+ * the operational log without bound.</p>
  */
 @RestController
 class JobLogReadController {
 	static final String PATH = "/api/v1/jobs/{jobId}/logs";
+	static final Duration REJECTION_WARNING_INTERVAL = Duration.ofMinutes(1);
 	private static final String BEARER_PREFIX = "Bearer ";
 	private static final Logger log = LoggerFactory.getLogger(JobLogReadController.class);
 	private final JobLogStore logs;
 	private final byte[] tokenDigest;
+	private final Clock clock;
+	private final AtomicLong rejectedSinceWarning = new AtomicLong();
+	private final AtomicReference<Instant> nextRejectionWarning = new AtomicReference<>(Instant.MIN);
 
+	@Autowired
 	JobLogReadController(JobLogStore logs, JobLogReadProperties properties) {
+		this(logs, properties, Clock.systemUTC());
+	}
+
+	/**
+	 * Accepts an explicit clock so tests can control the rejection warning
+	 * interval. The registration package already exposes a {@link Clock} bean, so
+	 * a second one is not registered here; that would make injection by type
+	 * ambiguous.
+	 */
+	JobLogReadController(JobLogStore logs, JobLogReadProperties properties, Clock clock) {
 		this.logs = Objects.requireNonNull(logs);
 		this.tokenDigest = properties.enabled() ? sha256(properties.token()) : null;
+		this.clock = Objects.requireNonNull(clock);
 	}
 
 	@GetMapping(PATH)
@@ -61,7 +84,7 @@ class JobLogReadController {
 			return ResponseEntity.notFound().build();
 		}
 		if (!authorized(authorization)) {
-			log.warn("Rejected an unauthenticated Job log read");
+			recordRejection();
 			return ResponseEntity.status(HttpStatus.UNAUTHORIZED).header(HttpHeaders.WWW_AUTHENTICATE, "Bearer").build();
 		}
 		JobId id;
@@ -76,6 +99,22 @@ class JobLogReadController {
 		}
 		log.info("Served Job log for jobId={} ({} records)", id, records.size());
 		return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(JobLogView.of(id, records));
+	}
+
+	/**
+	 * Counts a rejected read and logs the count when the warning interval has
+	 * passed. Only the caller that advances the interval logs, so concurrent
+	 * rejections produce one warning; rejections counted after it are reported
+	 * by the next one.
+	 */
+	private void recordRejection() {
+		rejectedSinceWarning.incrementAndGet();
+		var now = clock.instant();
+		var next = nextRejectionWarning.get();
+		if (now.isBefore(next) || !nextRejectionWarning.compareAndSet(next, now.plus(REJECTION_WARNING_INTERVAL))) {
+			return;
+		}
+		log.warn("Rejected unauthenticated Job log reads: {} since the previous warning", rejectedSinceWarning.getAndSet(0));
 	}
 
 	private boolean authorized(String authorization) {

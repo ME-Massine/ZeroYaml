@@ -861,17 +861,23 @@ bytes have waited one minute, or at close. A stream switch does not flush, so
 interleaved line output cannot exhaust the chunk budget; cross-stream order is
 kept at chunk granularity. After two consecutive ingress failures, data delivery
 pauses for 30 seconds and then probes with the next chunk; an acknowledged
-chunk resets the count, and sends cancelled by the Runner itself do not count. Docker
+chunk resets the count, and sends cancelled by the Runner itself neither count
+nor log a delivery warning. A stream that lost output during the pause starts a
+new chunk afterwards, so no record spans the gap. Docker
 CLI diagnostics remain separate and are discarded. Enabling delivery overrides
 the daemon default log driver for Job containers with bounded readable `local`
-logs; disabled delivery preserves that default and starts no follower. After the
-command exits, log delivery has ten seconds plus 100 ms per chunk still allowed
-by the capture budget (at most 35.6 seconds) to drain before the remaining
+logs (two 10 MB files); disabled delivery preserves that default and starts no
+follower. Following stops once the 1 MiB or 256-chunk capture budget discards
+output. After the
+command exits, log delivery has a fixed 35 seconds to drain before the remaining
 output is marked incomplete, so slow delivery cannot hold the container or the
-terminal status report. The pending flush and final marker then share one
-five-second bound, so delivery after command exit takes at most 40.6 seconds;
+terminal status report; a failed `docker wait` stops the follower at once. The
+pending flush and final marker then share one
+five-second bound, so delivery after command exit takes at most 40 seconds;
 the pending chunks may use only half of it, which keeps a window for the final
-marker when a chunk send stalls. A
+marker when a chunk send stalls. No final marker is sent when the Job container
+was never started, for example after a failed checkout. Rejected reads of the
+log endpoint are logged as one counted warning per minute at most. A
 cancelled dispatch bounds them together to one second, or a fifth of
 `ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT` if that is shorter, to reserve shutdown time
 for terminal status reporting.

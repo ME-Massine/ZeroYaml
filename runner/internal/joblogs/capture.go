@@ -4,6 +4,7 @@ package joblogs
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"time"
@@ -15,6 +16,13 @@ const (
 	MaxOutputBytes = 1 << 20
 	MaxChunks      = 256
 )
+
+// ErrOutputLimit is returned by a capture writer once the byte or chunk budget
+// has discarded some of the written bytes. The bytes count as written, and the
+// output is marked truncated. Every later write to that stream is discarded as
+// well, so a follower may stop reading instead of draining output that can no
+// longer be retained.
+var ErrOutputLimit = errors.New("job output capture budget exhausted")
 
 // maxPendingAge bounds how long pending output waits for a full chunk once more
 // output arrives. Aged output is sent on the next write to either stream; no
@@ -31,7 +39,9 @@ const maxConsecutiveFailures = 2
 
 // deliveryCooldown is how long data delivery stays paused after
 // maxConsecutiveFailures. Output observed meanwhile, and any pending chunk
-// flushed meanwhile, is dropped without a network call; the first chunk sent
+// flushed meanwhile, is dropped without a network call. A stream that loses
+// output this way sends its pending chunk before accepting new output, so one
+// record never spans the gap. The first chunk sent
 // after the cooldown is a probe whose success resumes delivery and whose
 // failure pauses it again. A stalled ingress therefore costs at most one call
 // bounded by ZEROYAML_RUNNER_STATUS_REPORT_TIMEOUT (5 seconds by default) per
@@ -95,17 +105,19 @@ type Capture struct {
 	pending             [2]pendingChunk
 	consecutiveFailures int
 	retryAfter          time.Time
-	dropped             int
 	truncated           bool
 	incomplete          bool
 	closed              bool
 }
 
 // pendingChunk is the not yet sent output of one stream. observedAt is the
-// observation time of its first byte.
+// observation time of its first byte. sealed marks a chunk that later output of
+// its stream was dropped after, so it must be sent before that stream's next
+// bytes start a new chunk.
 type pendingChunk struct {
 	content    []byte
 	observedAt time.Time
+	sealed     bool
 }
 
 // NewCapture creates the bounded capture for one dispatched Job.
@@ -117,7 +129,8 @@ func NewCapture(ctx context.Context, jobID string, sink Sink) *Capture {
 }
 
 // Writer returns a pipe writer safe to use concurrently with the other stream.
-// Excess output is drained without retention so the command can finish.
+// Output that cannot be retained is discarded but still reported as written;
+// once the budget discards bytes, Write also returns ErrOutputLimit.
 func (c *Capture) Writer(stream Stream) io.Writer {
 	return streamWriter{capture: c, stream: stream}
 }
@@ -150,13 +163,23 @@ func (w streamWriter) Write(p []byte) (int, error) {
 			c.mu.Unlock()
 			break
 		}
-		// A chunk is counted when it starts, so the pending chunks of both
-		// streams can never exceed the chunk budget once they are sent.
-		if c.coolingDown() || c.bytes == MaxOutputBytes ||
-			(len(pending.content) == 0 && c.chunks == MaxChunks) {
+		if c.coolingDown() {
+			pending.sealed = len(pending.content) > 0
 			c.truncated = true
 			c.mu.Unlock()
 			break
+		}
+		if pending.sealed {
+			c.mu.Unlock()
+			c.flush(c.ctx, w.stream)
+			continue
+		}
+		// A chunk is counted when it starts, so the pending chunks of both
+		// streams can never exceed the chunk budget once they are sent.
+		if c.bytes == MaxOutputBytes || (len(pending.content) == 0 && c.chunks == MaxChunks) {
+			c.truncated = true
+			c.mu.Unlock()
+			return n, ErrOutputLimit
 		}
 		if len(pending.content) == 0 {
 			c.chunks++
@@ -188,26 +211,28 @@ func (c *Capture) drainStopped(n int) (int, error) {
 // flushAged sends every pending chunk that has waited maxPendingAge, oldest
 // first. It requires the delivery token.
 func (c *Capture) flushAged(ctx context.Context) {
-	for _, stream := range c.pendingByAge() {
+	streams, count := c.pendingByAge()
+	for _, stream := range streams[:count] {
 		if c.now().Sub(c.pending[stream-1].observedAt) >= maxPendingAge {
 			c.flush(ctx, stream)
 		}
 	}
 }
 
-// pendingByAge lists streams with pending output, oldest first byte first.
-// It requires the delivery token.
-func (c *Capture) pendingByAge() []Stream {
-	streams := make([]Stream, 0, len(c.pending))
-	for _, stream := range []Stream{Stdout, Stderr} {
+// pendingByAge lists the count streams with pending output, oldest first byte
+// first. It returns an array because it runs on every write. It requires the
+// delivery token.
+func (c *Capture) pendingByAge() (streams [2]Stream, count int) {
+	for _, stream := range [...]Stream{Stdout, Stderr} {
 		if len(c.pending[stream-1].content) > 0 {
-			streams = append(streams, stream)
+			streams[count] = stream
+			count++
 		}
 	}
-	if len(streams) == 2 && c.pending[Stderr-1].observedAt.Before(c.pending[Stdout-1].observedAt) {
+	if count == 2 && c.pending[Stderr-1].observedAt.Before(c.pending[Stdout-1].observedAt) {
 		streams[0], streams[1] = streams[1], streams[0]
 	}
-	return streams
+	return streams, count
 }
 
 // flush requires the delivery token. A record owns its bytes after delivery;
@@ -228,9 +253,9 @@ func (c *Capture) flush(ctx context.Context, stream Stream) {
 	}
 	record := Record{JobID: c.jobID, ObservedAt: pending.observedAt, Stream: stream, Content: pending.content}
 	pending.content = nil
+	pending.sealed = false
 	c.mu.Lock()
 	if c.coolingDown() {
-		c.dropped++
 		c.truncated = true
 		c.mu.Unlock()
 		return
@@ -262,15 +287,6 @@ func (c *Capture) flush(ctx context.Context, stream Stream) {
 // coolingDown reports whether data delivery is paused. It requires mu.
 func (c *Capture) coolingDown() bool {
 	return c.consecutiveFailures >= maxConsecutiveFailures && c.now().Before(c.retryAfter)
-}
-
-// RemainingChunks reports how many data chunks the capture may still send,
-// including pending ones. It bounds the delivery work left after command exit.
-// Every started chunk is eventually sent, dropped, or still pending.
-func (c *Capture) RemainingChunks() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return MaxChunks - int(c.sequence) - c.dropped
 }
 
 // MarkIncomplete records a failure in the output source without changing the
@@ -318,7 +334,8 @@ func (c *Capture) Close(ctx context.Context, interrupted bool) error {
 		return ctx.Err()
 	}
 	flushCtx, cancelFlush := pendingFlushContext(ctx)
-	for _, stream := range c.pendingByAge() {
+	streams, count := c.pendingByAge()
+	for _, stream := range streams[:count] {
 		c.flush(flushCtx, stream)
 	}
 	cancelFlush()

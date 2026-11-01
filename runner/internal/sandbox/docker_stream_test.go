@@ -54,6 +54,33 @@ func TestCLIDockerStreamPreservesStderrBeforeCancellation(t *testing.T) {
 	}
 }
 
+func TestCLIDockerStreamStopsFollowingOnceTheCaptureBudgetIsSpent(t *testing.T) {
+	t.Setenv("ZEROYAML_TEST_LOG_FOLLOWER", "flood")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sink := &logSink{}
+	capture := joblogs.NewCapture(ctx, "job", sink)
+	if err := cliDockerStream(executable)(ctx, capture.Writer(joblogs.Stdout), capture.Writer(joblogs.Stderr), "container"); err != nil || ctx.Err() != nil {
+		t.Fatalf("follower error = %v, context = %v", err, ctx.Err())
+	}
+	if err := capture.Close(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	retained := 0
+	for _, record := range sink.records {
+		retained += len(record.Content)
+	}
+	// An early stop is not a stream failure: the log is truncated, not incomplete.
+	last := sink.records[len(sink.records)-1]
+	if retained != joblogs.MaxOutputBytes || !last.EndOfOutput || !last.Truncated || last.Incomplete {
+		t.Fatalf("retained %d bytes, final marker = %+v", retained, last)
+	}
+}
+
 type cancelAfterWrite struct {
 	io.Writer
 	cancel context.CancelFunc
@@ -77,6 +104,19 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	fmt.Fprint(os.Stdout, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+	if mode == "flood" {
+		// Like a running container with unbounded output, frames never end
+		// until the follower stops reading.
+		var frame [8 + joblogs.MaxChunkBytes]byte
+		frame[0] = 1
+		binary.BigEndian.PutUint32(frame[4:8], joblogs.MaxChunkBytes)
+		for ctx.Err() == nil {
+			if _, err := os.Stdout.Write(frame[:]); err != nil {
+				os.Exit(0)
+			}
+		}
+		os.Exit(0)
+	}
 	var header [8]byte
 	header[0] = 2
 	binary.BigEndian.PutUint32(header[4:], uint32(len("failure diagnostics\n")))

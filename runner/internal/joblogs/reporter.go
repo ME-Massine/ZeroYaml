@@ -12,7 +12,9 @@ import (
 	runnerv1 "github.com/MohamedMBG/ZeroYaml/runner/gen/runner/v1"
 	"github.com/MohamedMBG/ZeroYaml/runner/internal/runneridentity"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -68,6 +70,9 @@ func NewReporter(endpoint Endpoint, identity runneridentity.Identity, timeout ti
 func (r *Reporter) Close() error { return r.connection.Close() }
 
 // Append sends a single record and logs only correlation metadata on failure.
+// A send stopped because ctx ended was cancelled by the Runner itself, through
+// a drain or close bound, the Job deadline, or a cancellation; it says nothing
+// about the ingress and is logged at debug level only.
 func (r *Reporter) Append(ctx context.Context, record Record) error {
 	callCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
@@ -78,9 +83,26 @@ func (r *Reporter) Append(ctx context.Context, record Record) error {
 		if len(jobID) > 128 {
 			jobID = jobID[:128]
 		}
-		r.logger.WarnContext(ctx, "job log delivery failed", slog.String("job_id", jobID), slog.Uint64("sequence", record.Sequence), slog.Bool("end_of_output", record.EndOfOutput))
+		level, message := slog.LevelWarn, "job log delivery failed"
+		if stoppedByCaller(ctx, callCtx, err) {
+			level, message = slog.LevelDebug, "job log delivery stopped"
+		}
+		r.logger.Log(ctx, level, message, slog.String("job_id", jobID), slog.Uint64("sequence", record.Sequence), slog.Bool("end_of_output", record.EndOfOutput))
 	}
 	return err
+}
+
+// stoppedByCaller reports whether a failed call ended because of ctx rather
+// than the ingress: ctx was cancelled, or its deadline rather than the call
+// timeout bounded the call. The server can answer DEADLINE_EXCEEDED slightly
+// before ctx reports expiry, because gRPC rounds the transmitted timeout down.
+func stoppedByCaller(ctx, callCtx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	deadline, bounded := ctx.Deadline()
+	callDeadline, _ := callCtx.Deadline()
+	return bounded && deadline.Equal(callDeadline) && status.Code(err) == codes.DeadlineExceeded
 }
 
 func (r *Reporter) send(ctx context.Context, record Record) error {
