@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MohamedMBG/ZeroYaml/runner/internal/joblogs"
 )
 
 const (
@@ -76,10 +78,17 @@ const (
 	envJobTimeout          = "ZEROYAML_RUNNER_JOB_TIMEOUT"
 	envMaxConcurrentJobs   = "ZEROYAML_RUNNER_MAX_CONCURRENT_JOBS"
 	envLocalSourceRoot     = "ZEROYAML_RUNNER_LOCAL_SOURCE_ROOT"
+	envJobLogsAddress      = "ZEROYAML_JOB_LOGS_ADDRESS"
+	envJobLogsCertificate  = "ZEROYAML_JOB_LOGS_CERTIFICATE"
+	envJobLogsPrivateKey   = "ZEROYAML_JOB_LOGS_PRIVATE_KEY"
+	envJobLogsCA           = "ZEROYAML_JOB_LOGS_CA"
 )
 
 // Config contains startup configuration for the Runner process.
 type Config struct {
+	// JobLogs configures optional authenticated output delivery.
+	JobLogs joblogs.Endpoint
+
 	GRPCAddress string
 	RunnerID    string
 	Version     string
@@ -160,6 +169,12 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
+		JobLogs: joblogs.Endpoint{
+			Address:     valueFromEnv(envJobLogsAddress, ""),
+			Certificate: valueFromEnv(envJobLogsCertificate, ""),
+			PrivateKey:  valueFromEnv(envJobLogsPrivateKey, ""),
+			CA:          valueFromEnv(envJobLogsCA, ""),
+		},
 		GRPCAddress:         valueFromEnv(envGRPCAddress, defaultGRPCAddress),
 		RunnerID:            valueFromEnv(envRunnerID, defaultRunnerID),
 		Version:             valueFromEnv(envVersion, defaultVersion),
@@ -225,7 +240,37 @@ func (c Config) Validate() error {
 		return fmt.Errorf("%s must be greater than zero, got %s", envHeartbeatTimeout, c.HeartbeatTimeout)
 	}
 
+	if err := c.validateJobLogs(); err != nil {
+		return err
+	}
+
 	return c.validateExecution()
+}
+
+// validateJobLogs accepts either no log delivery configuration or all four
+// values, so a partial setup never silently disables delivery. The address is
+// a dial target, so unlike a listen address it must name a host. The TLS files
+// are read, and checked, when the Reporter is created.
+func (c Config) validateJobLogs() error {
+	logs := c.JobLogs
+	if logs == (joblogs.Endpoint{}) {
+		return nil
+	}
+
+	if logs.Address == "" || logs.Certificate == "" || logs.PrivateKey == "" || logs.CA == "" {
+		return fmt.Errorf("job log delivery requires %s, %s, %s, and %s together; leave all four unset to disable it",
+			envJobLogsAddress, envJobLogsCertificate, envJobLogsPrivateKey, envJobLogsCA)
+	}
+
+	if err := validateTCPAddress(logs.Address); err != nil {
+		return fmt.Errorf("%s must be a TCP address in host:port form, such as localhost:50053: %w", envJobLogsAddress, err)
+	}
+
+	if host, _, _ := net.SplitHostPort(logs.Address); host == "" {
+		return fmt.Errorf("%s must name a host, such as localhost:50053", envJobLogsAddress)
+	}
+
+	return nil
 }
 
 func (c Config) validateExecution() error {

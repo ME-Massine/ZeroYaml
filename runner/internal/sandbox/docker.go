@@ -1,13 +1,21 @@
 package sandbox
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MohamedMBG/ZeroYaml/runner/internal/joblogs"
 )
 
 const (
@@ -44,8 +52,8 @@ git checkout --quiet --detach FETCH_HEAD`
 	// The tail is kept because Docker prints the actionable reason last.
 	maxErrorDetailBytes = 512
 
-	// commandWaitDelay bounds how long a killed Docker CLI process may keep its
-	// output pipes open, so a cancelled call always returns.
+	// commandWaitDelay bounds CLI exit after log-response EOF and how long a
+	// killed Docker CLI process may keep its output pipes open.
 	commandWaitDelay = 5 * time.Second
 )
 
@@ -116,8 +124,16 @@ func checkoutCreateArgs(spec Spec, names resourceNames) []string {
 // jobCreateArgs passes the command as an explicit entrypoint and argument
 // vector. Overriding the entrypoint keeps an image's own ENTRYPOINT from
 // silently wrapping or replacing the dispatched executable.
-func jobCreateArgs(spec Spec, names resourceNames) []string {
+func jobCreateArgs(spec Spec, names resourceNames, captureLogs bool) []string {
 	args := containerCreateArgs(names.job, names, spec.Limits)
+	if captureLogs {
+		// Readable, bounded local logs are required by the Engine follower. A
+		// second file keeps the rotated file readable for a follower held back
+		// by delivery; a single file is replaced in place on rotation.
+		// Compression is off, so following a rotated file needs no decompression.
+		args = append(args, "--log-driver", "local", "--log-opt", "max-size=10m",
+			"--log-opt", "max-file=2", "--log-opt", "compress=false")
+	}
 	args = append(
 		args,
 		"--workdir", spec.WorkingDirectory,
@@ -126,6 +142,138 @@ func jobCreateArgs(spec Spec, names resourceNames) []string {
 	)
 
 	return append(args, spec.Command[1:]...)
+}
+
+// dockerStreamFunc copies Docker's non-TTY stdout/stderr pipes into bounded
+// writers. Engine frames retain per-stream byte order; observation order cannot
+// reconstruct the command's exact write order across streams.
+type dockerStreamFunc func(context.Context, io.Writer, io.Writer, string) error
+
+func cliDockerStream(dockerBinary string) dockerStreamFunc {
+	return func(ctx context.Context, stdout io.Writer, stderr io.Writer, containerID string) error {
+		if containerID == "" {
+			return errors.New("Docker container identity is required")
+		}
+		// dial-stdio uses the CLI's configured Docker transport, including named
+		// pipes on Windows. Engine frames separate container stderr from CLI
+		// diagnostics, so output can be forwarded before the follower exits.
+		streamCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+		command := exec.CommandContext(streamCtx, dockerBinary, "system", "dial-stdio")
+		command.Stderr = io.Discard
+		command.WaitDelay = commandWaitDelay
+		request, err := command.StdinPipe()
+		if err != nil {
+			return errors.New("docker output stream failed")
+		}
+		defer request.Close()
+		pipe, err := command.StdoutPipe()
+		if err != nil {
+			return errors.New("docker output stream failed")
+		}
+		defer pipe.Close()
+		if err := command.Start(); err != nil {
+			return errors.New("docker output stream failed")
+		}
+		// Keep stdin open while reading: dial-stdio closes the daemon connection
+		// when its input reaches EOF, even if the response is still arriving.
+		if _, err := io.WriteString(request, "GET /containers/"+url.PathEscape(containerID)+"/logs?follow=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n"); err != nil {
+			cancel()
+			_ = command.Wait() // Reap the process; the request write failure is returned below.
+			return errors.New("docker output stream failed")
+		}
+		response, readErr := http.ReadResponse(bufio.NewReader(pipe), nil)
+		limited := false
+		if readErr == nil {
+			if response.StatusCode != http.StatusOK {
+				readErr = errors.New("docker log request failed")
+			} else {
+				readErr = copyDockerLogFrames(response.Body, stdout, stderr)
+				if errors.Is(readErr, joblogs.ErrOutputLimit) {
+					// Nothing more can be retained, so following ends early. The
+					// container writes to its log driver, not to this reader, so
+					// stopping never blocks the command.
+					readErr = nil
+					limited = true
+				}
+			}
+			// A malformed frame or a spent budget must not leave Close draining
+			// an open response. Ordinary EOF instead preserves the process exit
+			// status: killing it here would hide a failure between whole frames.
+			if readErr != nil || limited {
+				cancel()
+			}
+			if err := response.Body.Close(); readErr == nil && !limited {
+				readErr = err
+			}
+		}
+		if err := request.Close(); readErr == nil && !limited {
+			readErr = err
+		}
+		if readErr != nil || limited {
+			cancel()
+		}
+		// EOF on stdin lets dial-stdio exit after the complete response. A
+		// misbehaving CLI still has a bounded reap, even with a live Job context.
+		stopReap := time.AfterFunc(commandWaitDelay, cancel)
+		waitErr := command.Wait()
+		stopReap.Stop()
+		// A stop by the caller's context is reported as that context error, so
+		// callers can tell an expected stop from a stream failure. Neither error
+		// carries CLI diagnostics or output.
+		if ctx.Err() != nil && (readErr != nil || waitErr != nil) {
+			return fmt.Errorf("docker output stream stopped: %w", ctx.Err())
+		}
+		if readErr != nil || (waitErr != nil && !limited) {
+			return errors.New("docker output stream failed")
+		}
+		return nil
+	}
+}
+
+// Non-TTY Engine logs use an eight-byte header followed by the raw payload.
+// Payloads stream through a fixed buffer; partial payloads are
+// delivered before a cancellation or transport failure is returned.
+func copyDockerLogFrames(source io.Reader, stdout, stderr io.Writer) error {
+	var header [8]byte
+	var chunk [4096]byte
+	for {
+		if _, err := io.ReadFull(source, header[:]); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		var destination io.Writer
+		switch header[0] {
+		case 1:
+			destination = stdout
+		case 2:
+			destination = stderr
+		default:
+			return errors.New("invalid Docker stream")
+		}
+		if header[1] != 0 || header[2] != 0 || header[3] != 0 {
+			return errors.New("invalid Docker stream header")
+		}
+		for remaining := int64(binary.BigEndian.Uint32(header[4:])); remaining > 0; {
+			n, readErr := io.ReadFull(source, chunk[:min(remaining, int64(len(chunk)))])
+			if n > 0 {
+				written, writeErr := destination.Write(chunk[:n])
+				if writeErr != nil {
+					return writeErr
+				}
+				if written != n {
+					return io.ErrShortWrite
+				}
+				remaining -= int64(n)
+			}
+			if readErr != nil {
+				return readErr
+			}
+		}
+	}
 }
 
 // Probe reports whether the Docker daemon behind dockerBinary is reachable,

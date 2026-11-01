@@ -159,7 +159,9 @@ execution, so anything left behind stays attributable and removable.
   container's configuration (`docker inspect`) while that container exists.
 - The workspace volume is owned by root. An image whose default user is not root
   cannot write to `/workspace`.
-- Command output is not captured yet; log streaming is a separate issue.
+- Command stdout/stderr is captured with bounded, best-effort delivery to the
+  Control Plane. See [Runner job logs](./runner-job-logs.md) for ordering,
+  truncation, retention, and interruption semantics.
 - The sandbox targets local development. Multi-tenant isolation hardening, such
   as user namespaces, seccomp profiles, and network policy, is out of scope.
 

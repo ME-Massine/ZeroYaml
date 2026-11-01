@@ -18,7 +18,7 @@ func TestJobCreateArgsPassTheCommandAndWorkingDirectoryExplicitly(t *testing.T) 
 	spec := testSpec()
 	spec.Command = []string{"go", "test", "./...", "-run", "Test; rm -rf /"}
 
-	args := jobCreateArgs(spec, newResourceNames(testExecutionID))
+	args := jobCreateArgs(spec, newResourceNames(testExecutionID), true)
 
 	imageIndex := slices.Index(args, spec.Image)
 	if imageIndex < 0 {
@@ -38,6 +38,10 @@ func TestJobCreateArgsPassTheCommandAndWorkingDirectoryExplicitly(t *testing.T) 
 	assertOption(t, options, "--memory-swap", "2147483648")
 	assertOption(t, options, "--pids-limit", "512")
 	assertOption(t, options, "--pull", "missing")
+	assertOption(t, options, "--log-driver", "local")
+	assertOption(t, options, "--log-opt", "max-size=10m")
+	assertOption(t, options, "--log-opt", "max-file=2")
+	assertOption(t, options, "--log-opt", "compress=false")
 
 	if slices.Contains(options, "--privileged") {
 		t.Error("job container must never be privileged")

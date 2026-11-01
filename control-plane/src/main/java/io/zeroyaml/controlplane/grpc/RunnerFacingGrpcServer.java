@@ -14,10 +14,9 @@ import io.grpc.ServerBuilder;
 import io.zeroyaml.controlplane.registration.RunnerRegistrationServerProperties;
 
 /**
- * Owns the lifecycle of the single gRPC endpoint Runners call, and hosts every
- * Control Plane gRPC service on it. Runners are configured with one Control
- * Plane address, so registration, heartbeats, and execution status reports
- * share this listener rather than one port per service.
+ * Owns the legacy gRPC endpoint for registration, heartbeats, and execution
+ * status reports. Log ingress uses a separate authenticated TLS listener and
+ * is deliberately not registered as a BindableService bean on this endpoint.
  *
  * <p>Starting is bound to application startup so that a Runner can register as
  * soon as the Control Plane is ready, and a bound-port failure fails startup

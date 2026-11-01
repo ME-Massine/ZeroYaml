@@ -14,10 +14,9 @@ import org.springframework.validation.annotation.Validated;
  * startup check below make an invalid value fail during application startup
  * instead of silently misjudging Runner liveness.
  *
- * <p>The {@code port} is the single Runner-facing endpoint. Every Control Plane
- * gRPC service a Runner calls is served on it, so the setting keeps its
- * original {@code zeroyaml.registration} prefix rather than changing deployed
- * configuration.</p>
+ * <p>The {@code port} serves registration, heartbeat, and execution status.
+ * The setting keeps its original {@code zeroyaml.registration} prefix for
+ * deployed configuration. Optional mTLS log ingress has separate settings.</p>
  */
 @Validated
 @ConfigurationProperties(prefix = "zeroyaml.registration")

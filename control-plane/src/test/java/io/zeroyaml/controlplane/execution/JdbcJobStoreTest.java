@@ -205,6 +205,39 @@ class JdbcJobStoreTest {
 	}
 
 	@Test
+	void logAttributionDoesNotWaitForOrWriteTheLifecycleRow() throws Exception {
+		var id = new PipelineJobCreationService(store, event -> { }, Clock.fixed(NOW, ZoneOffset.UTC))
+				.createJobs(pipeline(SOURCE)).jobs().getFirst().jobId();
+		store.update(id, job -> {
+			job.queue(NOW.plusSeconds(1));
+			job.start(RUNNER, NOW.plusSeconds(2));
+			return job.status();
+		});
+		var version = jdbc.sql("SELECT xmin::text FROM job WHERE id = :id")
+				.param("id", id.value()).query(String.class).single();
+		var logs = new InMemoryJobLogStore();
+		var recorder = new JobLogRecorder(freshStore(), logs);
+		try (var executor = Executors.newSingleThreadExecutor()) {
+			transactions.executeWithoutResult(transaction -> {
+				jdbc.sql("SELECT id FROM job WHERE id = :id FOR UPDATE")
+						.param("id", id.value()).query(UUID.class).single();
+				var append = executor.submit(() -> recorder.append(new JobLogRecord(id, RUNNER, 1,
+						NOW.minusSeconds(3600), JobLogRecord.Stream.STDOUT, new byte[] { 'x' }, false, false, false)));
+				try {
+					// This must finish while another connection still owns the lifecycle lock.
+					assertTrue(append.get(5, TimeUnit.SECONDS));
+				} catch (Exception exception) {
+					throw new AssertionError("log attribution waited for a lifecycle row lock", exception);
+				}
+			});
+		}
+		assertEquals(1, logs.snapshot(id).size());
+		assertEquals(version, jdbc.sql("SELECT xmin::text FROM job WHERE id = :id")
+				.param("id", id.value()).query(String.class).single());
+		assertEquals(JobStatus.RUNNING, freshStore().find(id).orElseThrow().status());
+	}
+
+	@Test
 	void concurrentTerminalReportsCommitOneOutcome() throws Exception {
 		var id = new PipelineJobCreationService(store, event -> { }, Clock.fixed(NOW, ZoneOffset.UTC))
 				.createJobs(pipeline(SOURCE)).jobs().get(0).jobId();

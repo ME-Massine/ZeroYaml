@@ -249,6 +249,18 @@ class GrpcJobExecutionStatusServiceTest {
 								.build()),
 				new Malformed("terminal report without a completion time",
 						runningRequest(job.id()).setState(JobExecutionState.JOB_EXECUTION_SUCCEEDED).build()),
+				new Malformed("start time beyond the protobuf timestamp range",
+						runningRequest(job.id())
+								.setStartedAt(Timestamp.newBuilder().setSeconds(253402300800L).build())
+								.build()),
+				new Malformed("start time with negative nanoseconds",
+						runningRequest(job.id())
+								.setStartedAt(Timestamp.newBuilder().setNanos(-1).build())
+								.build()),
+				new Malformed("completion time beyond the protobuf timestamp range",
+						terminalRequest(job.id(), JobExecutionState.JOB_EXECUTION_SUCCEEDED)
+								.setCompletedAt(Timestamp.newBuilder().setSeconds(Long.MAX_VALUE).build())
+								.build()),
 				new Malformed("completion before the start",
 						terminalRequest(job.id(), JobExecutionState.JOB_EXECUTION_SUCCEEDED)
 								.setCompletedAt(timestampOf(STARTED_AT.minusSeconds(1)))

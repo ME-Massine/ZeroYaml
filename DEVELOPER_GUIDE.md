@@ -634,8 +634,9 @@ reachable, and it has a free execution slot; see
 
 ### Runner-facing gRPC endpoint
 
-The Control Plane serves every gRPC service a Runner calls on one endpoint, so a
-Runner is configured with a single Control Plane address:
+The Control Plane shares one endpoint for registration, heartbeats, and execution
+status. Optional Job log ingress uses a separate mTLS endpoint; configuration is
+listed in [Runner job logs](./docs/architecture/runner-job-logs.md).
 
 | Property | Default | Purpose |
 | --- | --- | --- |
@@ -643,8 +644,7 @@ Runner is configured with a single Control Plane address:
 | `zeroyaml.registration.heartbeat-timeout` | `15s` | Time without a heartbeat before a Runner is reported `UNAVAILABLE` |
 
 The setting keeps its `zeroyaml.registration` prefix so deployed configuration
-and Runner environment variables stay valid as services are added to the
-endpoint.
+and Runner environment variables stay valid for registration and status reports.
 
 `JobExecutionStatusService.ReportJobStatus` is how a Runner reports what one
 execution did. The Control Plane owns authoritative Job state: it validates
@@ -836,6 +836,67 @@ report when an accepted Job starts and one terminal report when it ends.
 
 ### Runner Docker execution
 
+Job stdout and stderr can be delivered through `JobLogService.AppendJobLog`
+to a dedicated mTLS listener, disabled until certificates are configured on both
+services. The existing registration/status endpoint does not serve logs. Capture
+retains at most 1 MiB or 256 data chunks per Job, followed by a final marker identifying truncation
+or interruption. Delivery uses `ZEROYAML_RUNNER_STATUS_REPORT_TIMEOUT` for each
+call; failures do not change execution status. The Control Plane retains at
+most 32 Jobs' logs in memory through `JobLogStore.snapshot`. Finished output or
+streams idle for at least five minutes can be evicted; full retention with recent
+active output refuses new Jobs' logs. Final markers after retention loss are
+accepted and stored as incomplete; records that would open a new stream for a
+terminal Job are refused. Restart
+loses all logs. `GET /api/v1/jobs/{jobId}/logs` reads retained output; it answers
+`404` while `ZEROYAML_JOB_LOGS_READ_TOKEN` is unset or empty, a whitespace-only
+token fails startup, and every read needs `Authorization: Bearer <token>` of at
+least 32 characters (the scheme name is case-insensitive). There is no UI
+log viewer. Enabling the reader also requires native HTTPS configured through
+`server.ssl` and explicit `server.forward-headers-strategy=NONE`; startup fails
+otherwise. Provision the HTTP server certificate and key outside source control,
+separately from the gRPC log-ingress credentials. Proxies must connect to the
+Control Plane over HTTPS, and clients must use HTTPS from the first request.
+Plaintext reads return `403` before token validation or log lookup, without a
+redirect; forwarded headers cannot establish transport security. See the
+[reader TLS configuration](./docs/architecture/runner-job-logs.md#reading-retained-output)
+for an external configuration example. Log ingress runs on 8 fixed worker
+threads with at most 64 concurrent calls and 8 concurrent streams per connection. Raw command bytes are
+excluded from operational logs; arbitrary secrets printed by a command are
+not automatically redacted. Job output is read from Docker Engine frames over
+`docker system dial-stdio`; stdout and stderr observations are coalesced into one
+pending 4 KiB buffer per stream, flushed when full, on a write after the pending
+bytes have waited one minute, or at close. A stream switch does not flush, so
+interleaved line output cannot exhaust the chunk budget; cross-stream order is
+kept at chunk granularity. After two consecutive ingress failures, data delivery
+pauses for 30 seconds and then probes with the next chunk; an acknowledged
+chunk resets the count, and sends cancelled by the Runner itself neither count
+nor log a delivery warning. A stream that lost output during the pause starts a
+new chunk afterwards, so no record spans the gap. Docker
+CLI diagnostics remain separate and are discarded. A follower process that
+fails after a complete frame still marks capture incomplete; a normal EOF lets
+the CLI exit and checks its status, with a bounded reap. Enabling delivery overrides
+the daemon default log driver for Job containers with bounded readable `local`
+logs (two 10 MB files); disabled delivery preserves that default and starts no
+follower. Following stops once the 1 MiB or 256-chunk capture budget discards
+output. After the
+command exits, log delivery has a fixed 35 seconds to drain before the remaining
+output is marked incomplete, so slow delivery cannot hold the container or the
+terminal status report; a failed `docker wait` stops the follower at once. The
+pending flush and final marker then share one
+five-second bound, so delivery after command exit takes at most 40 seconds;
+the pending chunks may use only half of it, which keeps a window for the final
+marker when a chunk send stalls. No final marker is sent when the Job container
+was never started, for example after a failed checkout. Rejected reads of the
+log endpoint are logged as one counted warning per minute at most. A
+cancelled dispatch bounds them together to one second, or a fifth of
+`ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT` if that is shorter, to reserve shutdown time
+for terminal status reporting. This bound also applies if shutdown starts
+during an existing close: pending sends stop immediately, leaving the shorter
+window for the final marker.
+A partial `ZEROYAML_JOB_LOGS_*` configuration or an invalid
+`ZEROYAML_JOB_LOGS_ADDRESS` fails Runner configuration loading at startup.
+See [Runner job logs](./docs/architecture/runner-job-logs.md).
+
 `runner/internal/sandbox` runs every accepted Job in Docker; the Runner never
 executes a Job command on its host. At startup the Runner probes the Docker
 daemon with `docker version`. If the daemon does not answer, the Runner keeps
@@ -863,7 +924,8 @@ Pop-Location
 ```
 
 The Go protobuf bindings can be regenerated from the repository root after
-installing the pinned `protoc-gen-go` and `protoc-gen-go-grpc` tool versions:
+installing `protoc` v36.0, `protoc-gen-go` v1.36.12, and
+`protoc-gen-go-grpc` v1.6.2 (the checked-in Go bindings' pinned versions):
 
 ```powershell
 protoc -I proto `

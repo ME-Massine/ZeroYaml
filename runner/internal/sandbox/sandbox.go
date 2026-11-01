@@ -28,11 +28,35 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MohamedMBG/ZeroYaml/runner/internal/joblogs"
 )
 
 // defaultCleanupTimeout bounds each removal command. Removal runs after the
 // execution context may already be done, so it needs a budget of its own.
 const defaultCleanupTimeout = 30 * time.Second
+
+// defaultLogDrainTimeout bounds log delivery that is still running after the
+// Job command has exited, so slow delivery cannot hold the container until the
+// execution deadline. Delivery sends one chunk at a time; the bound fits a full
+// 1 MiB backlog at about 136 ms per acknowledgment. Following stops once the
+// capture budget is spent, so the bound only matters while delivery is slow.
+const defaultLogDrainTimeout = 35 * time.Second
+
+// defaultLogFinalTimeout bounds the final log flush when the execution was not
+// cancelled, including after a timeout. Close sends at most the two pending
+// chunks and the final marker. Without its own bound each send would only be
+// limited by the Sink's per-call timeout, so a slow ingress could delay the
+// terminal status report by three call timeouts while the Job keeps its
+// concurrency slot. Together with the drain bound, output delivery after
+// command exit takes at most 40 seconds, excluding container cleanup.
+const defaultLogFinalTimeout = 5 * time.Second
+
+// maxLogCloseTimeout caps the final log flush after a cancellation. The bound is
+// also limited to a fifth of the Runner shutdown budget, so the log close never
+// consumes the time reserved for container cleanup and the terminal status
+// report, even with a short ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT.
+const maxLogCloseTimeout = time.Second
 
 // Outcome categorizes how an execution ended.
 type Outcome string
@@ -79,15 +103,40 @@ type dockerFunc func(ctx context.Context, args ...string) (string, error)
 // Sandbox runs Jobs in Docker containers. It holds no per-execution state, so
 // one instance may run concurrent executions.
 type Sandbox struct {
-	docker         dockerFunc
-	newID          func() (string, error)
-	cleanupTimeout time.Duration
-	logger         *slog.Logger
+	docker          dockerFunc
+	stream          dockerStreamFunc
+	logs            joblogs.Sink
+	newID           func() (string, error)
+	cleanupTimeout  time.Duration
+	logFinalTimeout time.Duration
+	// logCloseTimeout replaces logFinalTimeout after a cancellation.
+	logCloseTimeout time.Duration
+	logDrainTimeout time.Duration
+	logger          *slog.Logger
 }
 
-// New creates a Sandbox that drives the Docker CLI found at dockerBinary.
-func New(dockerBinary string, logger *slog.Logger) *Sandbox {
-	return newSandbox(cliDocker(dockerBinary), newExecutionID, defaultCleanupTimeout, logger)
+// jobOutput is the Job container's log capture. started records that the
+// container start was attempted; before that no command output can exist, so
+// Run sends no final marker.
+type jobOutput struct {
+	capture *joblogs.Capture
+	started bool
+}
+
+// New creates a Sandbox that drives the Docker CLI found at dockerBinary and
+// delivers bounded Job output to logs. A nil sink disables log following.
+// shutdownTimeout is the Runner's shutdown budget; it bounds the final log
+// flush after a cancellation.
+func New(dockerBinary string, logger *slog.Logger, logs joblogs.Sink, shutdownTimeout time.Duration) *Sandbox {
+	s := newSandbox(cliDocker(dockerBinary), newExecutionID, defaultCleanupTimeout, logger)
+	s.stream = cliDockerStream(dockerBinary)
+	s.logs = logs
+	s.logCloseTimeout = logCloseTimeout(shutdownTimeout)
+	return s
+}
+
+func logCloseTimeout(shutdownTimeout time.Duration) time.Duration {
+	return min(maxLogCloseTimeout, shutdownTimeout/5)
 }
 
 func newSandbox(
@@ -97,10 +146,13 @@ func newSandbox(
 	logger *slog.Logger,
 ) *Sandbox {
 	return &Sandbox{
-		docker:         docker,
-		newID:          newID,
-		cleanupTimeout: cleanupTimeout,
-		logger:         logger,
+		docker:          docker,
+		newID:           newID,
+		cleanupTimeout:  cleanupTimeout,
+		logFinalTimeout: defaultLogFinalTimeout,
+		logCloseTimeout: maxLogCloseTimeout,
+		logDrainTimeout: defaultLogDrainTimeout,
+		logger:          logger,
 	}
 }
 
@@ -111,21 +163,36 @@ func newSandbox(
 // Cancelling ctx stops the execution and yields OutcomeCancelled; exceeding
 // spec.Timeout yields OutcomeTimedOut.
 func (s *Sandbox) Run(ctx context.Context, spec Spec) Result {
+	runCtx, cancel := context.WithTimeout(ctx, spec.Timeout)
+	defer cancel()
 	executionID, err := s.newID()
 	if err != nil {
 		return Result{Outcome: OutcomeExecutionError, Message: fmt.Sprintf("generate execution identifier: %v", err)}
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, spec.Timeout)
-	defer cancel()
-
-	result := s.run(ctx, runCtx, executionID, spec)
+	output := &jobOutput{capture: joblogs.NewCapture(runCtx, spec.JobID, s.logs)}
+	result := s.run(ctx, runCtx, executionID, spec, output)
 	result.ExecutionID = executionID
+	if output.started {
+		interrupted := result.Outcome == OutcomeCancelled || result.Outcome == OutcomeTimedOut || result.Outcome == OutcomeExecutionError
+		s.closeLog(ctx, output.capture, interrupted)
+	}
 
 	return result
 }
 
-func (s *Sandbox) run(ctx context.Context, runCtx context.Context, executionID string, spec Spec) Result {
+// closeLog sends the final log marker after cleanup. The close is detached
+// from a cancelled execution but always bounded; after a cancellation the
+// shorter shutdown-derived bound protects the terminal status report.
+func (s *Sandbox) closeLog(ctx context.Context, capture *joblogs.Capture, interrupted bool) {
+	closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), s.logFinalTimeout)
+	defer closeCancel()
+	if err := capture.CloseOnShutdown(closeCtx, ctx, s.logCloseTimeout, interrupted); err != nil {
+		s.logger.WarnContext(ctx, "job output final marker was not acknowledged")
+	}
+}
+
+func (s *Sandbox) run(ctx context.Context, runCtx context.Context, executionID string, spec Spec, output *jobOutput) Result {
 	names := newResourceNames(executionID)
 
 	if _, err := s.docker(runCtx, volumeCreateArgs(names)...); err != nil {
@@ -139,7 +206,7 @@ func (s *Sandbox) run(ctx context.Context, runCtx context.Context, executionID s
 	}
 	defer s.remove(ctx, executionID, "workspace volume", "volume", "rm", "--force", names.volume)
 
-	checkoutExitCode, err := s.runContainer(ctx, runCtx, executionID, names.checkout, checkoutCreateArgs(spec, names))
+	checkoutExitCode, err := s.runContainer(ctx, runCtx, executionID, names.checkout, checkoutCreateArgs(spec, names), nil)
 	if err != nil {
 		return s.interrupted(ctx, runCtx, spec, "source checkout", err)
 	}
@@ -153,7 +220,7 @@ func (s *Sandbox) run(ctx context.Context, runCtx context.Context, executionID s
 		}
 	}
 
-	exitCode, err := s.runContainer(ctx, runCtx, executionID, names.job, jobCreateArgs(spec, names))
+	exitCode, err := s.runContainer(ctx, runCtx, executionID, names.job, jobCreateArgs(spec, names, s.logs != nil), output)
 	if err != nil {
 		return s.interrupted(ctx, runCtx, spec, "job command", err)
 	}
@@ -171,15 +238,17 @@ func (s *Sandbox) run(ctx context.Context, runCtx context.Context, executionID s
 
 // runContainer creates, starts, and waits for one container, then removes it.
 // Containers are removed explicitly instead of with --rm so that docker wait
-// can always read the exit code before the container disappears.
+// can always read the exit code before the container disappears. output is nil
+// for a container whose output is not captured.
 func (s *Sandbox) runContainer(
 	ctx context.Context,
 	runCtx context.Context,
 	executionID string,
 	name string,
 	createArgs []string,
+	output *jobOutput,
 ) (int32, error) {
-	output, err := s.docker(runCtx, createArgs...)
+	created, err := s.docker(runCtx, createArgs...)
 	if err != nil {
 		// The container may exist even though the create call failed: a create
 		// stopped by the deadline or a cancellation during a slow image pull, or
@@ -190,27 +259,113 @@ func (s *Sandbox) runContainer(
 		return 0, err
 	}
 
-	containerID := strings.TrimSpace(output)
+	containerID := strings.TrimSpace(created)
 	if containerID == "" {
 		return 0, errors.New("docker create returned no container ID")
 	}
 	defer s.remove(ctx, executionID, "container", "rm", "--force", "--volumes", containerID)
 
+	if output != nil {
+		// A failed start may still have run the command, so its output is
+		// closed with a final marker from here on.
+		output.started = true
+	}
 	if _, err := s.docker(runCtx, "start", containerID); err != nil {
 		return 0, err
 	}
-
-	output, err = s.docker(runCtx, "wait", containerID)
-	if err != nil {
-		return 0, err
+	// Observe the command exit independently of log delivery, which can still
+	// be stalled when a successful command reaches its execution deadline.
+	type waitResult struct {
+		output string
+		err    error
+	}
+	wait := make(chan waitResult, 1)
+	go func() {
+		output, err := s.docker(runCtx, "wait", containerID)
+		wait <- waitResult{output, err}
+	}()
+	var followed chan error
+	followCtx, stopFollowing := context.WithCancel(runCtx)
+	defer stopFollowing()
+	if s.logs != nil && output != nil && s.stream != nil {
+		// Following after start also reads output from a command that already
+		// exited. Checkout output is excluded because it can contain credentials.
+		capture := output.capture
+		followed = make(chan error, 1)
+		go func() {
+			followed <- s.stream(followCtx, capture.Writer(joblogs.Stdout), capture.Writer(joblogs.Stderr), containerID)
+		}()
 	}
 
-	exitCode, err := strconv.ParseInt(strings.TrimSpace(output), 10, 32)
+	result := <-wait
+	if followed != nil {
+		if result.err != nil {
+			// Without an observed exit, the container may still be running and
+			// its follower would not end on its own. The wait error is the
+			// reported failure, so the stop is not logged separately.
+			stopLogs(followed, stopFollowing, output.capture)
+		} else {
+			s.drainLogs(ctx, runCtx, executionID, followed, stopFollowing, output.capture)
+		}
+	}
+	if result.err != nil {
+		return 0, result.err
+	}
+
+	exitCode, err := strconv.ParseInt(strings.TrimSpace(result.output), 10, 32)
 	if err != nil {
 		return 0, fmt.Errorf("docker wait returned an unreadable exit code: %w", err)
 	}
 
 	return int32(exitCode), nil
+}
+
+// drainLogs waits for the follower after the command has exited. Slow but
+// successful delivery must not hold the container, the concurrency slot, and
+// the terminal status report until spec.Timeout, so the drain is bounded by
+// logDrainTimeout and output still unread when the bound expires is reported
+// as incomplete.
+//
+// A follower stopped by the execution deadline or a cancellation of runCtx
+// worked as designed: its output is incomplete, but no capture failure is
+// logged, so the warning stays reserved for Docker stream errors.
+func (s *Sandbox) drainLogs(
+	ctx context.Context,
+	runCtx context.Context,
+	executionID string,
+	followed <-chan error,
+	stopFollowing context.CancelFunc,
+	capture *joblogs.Capture,
+) {
+	timer := time.NewTimer(s.logDrainTimeout)
+	defer timer.Stop()
+	var err error
+	select {
+	case err = <-followed:
+	case <-timer.C:
+		stopLogs(followed, stopFollowing, capture)
+		s.logger.WarnContext(ctx, "job log drain exceeded its bound", slog.String("execution_id", executionID),
+			slog.Duration("log_drain_timeout", s.logDrainTimeout))
+		return
+	}
+	if err == nil {
+		return
+	}
+	capture.MarkIncomplete()
+	stopped := runCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+	if !stopped {
+		s.logger.WarnContext(ctx, "job log capture interrupted", slog.String("execution_id", executionID))
+	}
+}
+
+// stopLogs cancels in-flight and later data delivery before stopping the
+// follower, so a follower blocked on a send returns without waiting for the
+// Sink's call timeout. The output is marked incomplete; Close still sends the
+// pending chunks and the final marker.
+func stopLogs(followed <-chan error, stopFollowing context.CancelFunc, capture *joblogs.Capture) {
+	capture.StopDelivery()
+	stopFollowing()
+	<-followed
 }
 
 // interrupted classifies an execution that stopped before a command exited.

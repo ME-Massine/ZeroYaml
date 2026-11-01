@@ -373,3 +373,65 @@ func TestLoadRejectsInvalidExecutionConfiguration(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadReadsOptionalJobLogTLSConfiguration(t *testing.T) {
+	for _, name := range []string{"ZEROYAML_JOB_LOGS_ADDRESS", "ZEROYAML_JOB_LOGS_CERTIFICATE", "ZEROYAML_JOB_LOGS_PRIVATE_KEY", "ZEROYAML_JOB_LOGS_CA"} {
+		unsetForTest(t, name)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.JobLogs.Address != "" || cfg.JobLogs.Certificate != "" || cfg.JobLogs.PrivateKey != "" || cfg.JobLogs.CA != "" {
+		t.Fatal("log delivery must be disabled by default")
+	}
+	t.Setenv("ZEROYAML_JOB_LOGS_ADDRESS", "localhost:50053")
+	t.Setenv("ZEROYAML_JOB_LOGS_CERTIFICATE", "runner.pem")
+	t.Setenv("ZEROYAML_JOB_LOGS_PRIVATE_KEY", "runner-key.pem")
+	t.Setenv("ZEROYAML_JOB_LOGS_CA", "ca.pem")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.JobLogs.Address != "localhost:50053" || cfg.JobLogs.Certificate != "runner.pem" || cfg.JobLogs.PrivateKey != "runner-key.pem" || cfg.JobLogs.CA != "ca.pem" {
+		t.Fatal("log TLS configuration was not loaded")
+	}
+}
+
+func TestLoadRejectsPartialJobLogConfiguration(t *testing.T) {
+	names := []string{envJobLogsAddress, envJobLogsCertificate, envJobLogsPrivateKey, envJobLogsCA}
+	for _, set := range names {
+		t.Run(set, func(t *testing.T) {
+			for _, name := range names {
+				unsetForTest(t, name)
+			}
+			t.Setenv(set, "configured")
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected only %s to fail", set)
+			}
+			for _, name := range names {
+				if !strings.Contains(err.Error(), name) {
+					t.Errorf("expected the error to name %s, got %q", name, err.Error())
+				}
+			}
+		})
+	}
+}
+
+func TestLoadRejectsMalformedJobLogAddress(t *testing.T) {
+	for _, address := range []string{"localhost", ":50053", "localhost:http", "localhost:0", "localhost:70000", "https://localhost:50053"} {
+		t.Run(address, func(t *testing.T) {
+			t.Setenv(envJobLogsAddress, address)
+			t.Setenv(envJobLogsCertificate, "runner.pem")
+			t.Setenv(envJobLogsPrivateKey, "runner-key.pem")
+			t.Setenv(envJobLogsCA, "ca.pem")
+
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), envJobLogsAddress) {
+				t.Fatalf("address %q: expected startup validation error, got %v", address, err)
+			}
+		})
+	}
+}
