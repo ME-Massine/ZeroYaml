@@ -317,6 +317,41 @@ func (c *Capture) StopDelivery() {
 // delivery. They share only half of the time left in ctx, so a slow chunk
 // send cannot leave the marker without a window.
 func (c *Capture) Close(ctx context.Context, interrupted bool) error {
+	return c.close(ctx, nil, 0, interrupted)
+}
+
+// CloseOnShutdown applies Close's normal deadline until shutdown is cancelled.
+// A shutdown already in progress bounds the whole close to grace. A shutdown
+// that starts during close cancels pending sends immediately and reserves grace
+// for the final marker, so data delivery cannot consume the shutdown budget.
+// ctx must also bound the normal close; a non-positive grace expires immediately.
+func (c *Capture) CloseOnShutdown(ctx, shutdown context.Context, grace time.Duration, interrupted bool) error {
+	if shutdown.Err() != nil {
+		closeCtx, cancel := context.WithTimeout(ctx, grace)
+		defer cancel()
+		return c.Close(closeCtx, interrupted)
+	}
+	return c.close(ctx, shutdown, grace, interrupted)
+}
+
+func (c *Capture) close(ctx, shutdown context.Context, grace time.Duration, interrupted bool) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	flushCtx, cancelFlush := pendingFlushContext(ctx)
+	defer cancelFlush()
+	if shutdown != nil {
+		stop := context.AfterFunc(shutdown, func() {
+			cancelFlush()
+			timer := time.NewTimer(grace)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				cancel()
+			case <-ctx.Done():
+			}
+		})
+		defer stop()
+	}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -333,7 +368,6 @@ func (c *Capture) Close(ctx context.Context, interrupted bool) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	flushCtx, cancelFlush := pendingFlushContext(ctx)
 	streams, count := c.pendingByAge()
 	for _, stream := range streams[:count] {
 		c.flush(flushCtx, stream)

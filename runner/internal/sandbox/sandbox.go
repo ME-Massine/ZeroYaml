@@ -185,13 +185,9 @@ func (s *Sandbox) Run(ctx context.Context, spec Spec) Result {
 // from a cancelled execution but always bounded; after a cancellation the
 // shorter shutdown-derived bound protects the terminal status report.
 func (s *Sandbox) closeLog(ctx context.Context, capture *joblogs.Capture, interrupted bool) {
-	closeTimeout := s.logFinalTimeout
-	if ctx.Err() != nil {
-		closeTimeout = s.logCloseTimeout
-	}
-	closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), s.logFinalTimeout)
 	defer closeCancel()
-	if err := capture.Close(closeCtx, interrupted); err != nil {
+	if err := capture.CloseOnShutdown(closeCtx, ctx, s.logCloseTimeout, interrupted); err != nil {
 		s.logger.WarnContext(ctx, "job output final marker was not acknowledged")
 	}
 }

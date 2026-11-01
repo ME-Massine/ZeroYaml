@@ -14,7 +14,7 @@ import (
 	"github.com/MohamedMBG/ZeroYaml/runner/internal/joblogs"
 )
 
-// TestDockerLogRotationWithBlockedFollower measures daemon-side loss without a
+// TestDockerLogRotationWithBlockedFollower checks for daemon-side loss without a
 // capture budget masking it. Gates, rather than sleeps, keep the reader paused
 // while the container exceeds the configured two-file rotation bound.
 func TestDockerLogRotationWithBlockedFollower(t *testing.T) {
@@ -78,7 +78,7 @@ func TestDockerLogRotationWithBlockedFollower(t *testing.T) {
 		t.Fatal("follower did not finish")
 	}
 	want := int64(generated + len("start\ntail"))
-	if writer.bytes > want {
+	if writer.bytes != want {
 		t.Fatalf("observed %d bytes, generated %d", writer.bytes, want)
 	}
 	t.Logf("two-file local rotation: generated=%d observed=%d missing=%d; follower returned no error", want, writer.bytes, want-writer.bytes)

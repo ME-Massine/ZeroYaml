@@ -383,9 +383,9 @@ message AppendJobLogRequest {
   bool end_of_output = 9;
   // Output exceeded the capture budget or a data chunk was not acknowledged.
   bool truncated = 10;
-  // Capture or delivery failed, or execution was interrupted. A final record
-  // may skip sequence numbers only when this flag is set. Missing final
-  // records also mean the log is incomplete.
+  // Capture or delivery failed, or execution was interrupted. The receiver
+  // marks a final record incomplete after any sequence gap, even when the
+  // sender clears this flag. Missing final records leave completeness unknown.
   bool incomplete = 11;
 }
 

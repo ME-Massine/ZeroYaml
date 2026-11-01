@@ -864,7 +864,9 @@ pauses for 30 seconds and then probes with the next chunk; an acknowledged
 chunk resets the count, and sends cancelled by the Runner itself neither count
 nor log a delivery warning. A stream that lost output during the pause starts a
 new chunk afterwards, so no record spans the gap. Docker
-CLI diagnostics remain separate and are discarded. Enabling delivery overrides
+CLI diagnostics remain separate and are discarded. A follower process that
+fails after a complete frame still marks capture incomplete; a normal EOF lets
+the CLI exit and checks its status, with a bounded reap. Enabling delivery overrides
 the daemon default log driver for Job containers with bounded readable `local`
 logs (two 10 MB files); disabled delivery preserves that default and starts no
 follower. Following stops once the 1 MiB or 256-chunk capture budget discards
@@ -880,7 +882,9 @@ was never started, for example after a failed checkout. Rejected reads of the
 log endpoint are logged as one counted warning per minute at most. A
 cancelled dispatch bounds them together to one second, or a fifth of
 `ZEROYAML_RUNNER_SHUTDOWN_TIMEOUT` if that is shorter, to reserve shutdown time
-for terminal status reporting.
+for terminal status reporting. This bound also applies if shutdown starts
+during an existing close: pending sends stop immediately, leaving the shorter
+window for the final marker.
 A partial `ZEROYAML_JOB_LOGS_*` configuration or an invalid
 `ZEROYAML_JOB_LOGS_ADDRESS` fails Runner configuration loading at startup.
 See [Runner job logs](./docs/architecture/runner-job-logs.md).

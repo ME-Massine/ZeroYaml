@@ -1703,9 +1703,9 @@ type AppendJobLogRequest struct {
 	EndOfOutput bool `protobuf:"varint,9,opt,name=end_of_output,json=endOfOutput,proto3" json:"end_of_output,omitempty"`
 	// Output exceeded the capture budget or a data chunk was not acknowledged.
 	Truncated bool `protobuf:"varint,10,opt,name=truncated,proto3" json:"truncated,omitempty"`
-	// Capture or delivery failed, or execution was interrupted. A final record
-	// may skip sequence numbers only when this flag is set. Missing final
-	// records also mean the log is incomplete.
+	// Capture or delivery failed, or execution was interrupted. The receiver
+	// marks a final record incomplete after any sequence gap, even when the
+	// sender clears this flag. Missing final records leave completeness unknown.
 	Incomplete    bool `protobuf:"varint,11,opt,name=incomplete,proto3" json:"incomplete,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

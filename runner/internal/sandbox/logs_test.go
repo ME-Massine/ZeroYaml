@@ -248,6 +248,74 @@ func TestRunBoundsLogCloseWithoutCancellation(t *testing.T) {
 	}
 }
 
+type closeLogSink func(context.Context, joblogs.Record) error
+
+func (s closeLogSink) Append(ctx context.Context, record joblogs.Record) error { return s(ctx, record) }
+
+func TestRunBoundsLogCloseWhenShutdownStartsDuringDelivery(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pending=%t", pending), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			var records []joblogs.Record
+			s := newTestSandbox(newFakeDocker())
+			s.logFinalTimeout = time.Minute
+			s.logCloseTimeout = 20 * time.Millisecond
+			s.logs = closeLogSink(func(callCtx context.Context, record joblogs.Record) error {
+				records = append(records, record)
+				if pending && record.EndOfOutput {
+					if callCtx.Err() != nil {
+						t.Error("pending send consumed the final marker's shutdown window")
+					}
+					return callCtx.Err()
+				}
+				once.Do(func() { close(entered) })
+				select {
+				case <-callCtx.Done():
+					return callCtx.Err()
+				case <-release:
+					return nil
+				}
+			})
+			s.stream = func(_ context.Context, stdout, _ io.Writer, _ string) error {
+				if pending {
+					_, err := stdout.Write([]byte("pending output"))
+					return err
+				}
+				return nil
+			}
+			result := make(chan Result, 1)
+			done := make(chan struct{})
+			go func() {
+				result <- s.Run(ctx, testSpec())
+				close(done)
+			}()
+			defer func() { close(release); <-done }()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("log close did not start")
+			}
+			cancel()
+			select {
+			case got := <-result:
+				if got.Outcome != OutcomeSucceeded {
+					t.Fatalf("log cancellation changed command result: %+v", got)
+				}
+				last := records[len(records)-1]
+				if !last.EndOfOutput || (pending && (!last.Incomplete || !last.Truncated)) {
+					t.Fatalf("final marker = %+v", last)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("shutdown during close retained the normal close timeout")
+			}
+		})
+	}
+}
+
 // slowLogSink acknowledges every record after a delay, like a healthy but
 // slow ingress.
 type slowLogSink struct {

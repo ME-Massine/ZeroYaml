@@ -52,8 +52,8 @@ git checkout --quiet --detach FETCH_HEAD`
 	// The tail is kept because Docker prints the actionable reason last.
 	maxErrorDetailBytes = 512
 
-	// commandWaitDelay bounds how long a killed Docker CLI process may keep its
-	// output pipes open, so a cancelled call always returns.
+	// commandWaitDelay bounds CLI exit after log-response EOF and how long a
+	// killed Docker CLI process may keep its output pipes open.
 	commandWaitDelay = 5 * time.Second
 )
 
@@ -184,6 +184,7 @@ func cliDockerStream(dockerBinary string) dockerStreamFunc {
 			return errors.New("docker output stream failed")
 		}
 		response, readErr := http.ReadResponse(bufio.NewReader(pipe), nil)
+		limited := false
 		if readErr == nil {
 			if response.StatusCode != http.StatusOK {
 				readErr = errors.New("docker log request failed")
@@ -194,21 +195,37 @@ func cliDockerStream(dockerBinary string) dockerStreamFunc {
 					// container writes to its log driver, not to this reader, so
 					// stopping never blocks the command.
 					readErr = nil
+					limited = true
 				}
 			}
-			// A malformed frame must not leave Close draining an open response.
-			cancel()
-			response.Body.Close()
+			// A malformed frame or a spent budget must not leave Close draining
+			// an open response. Ordinary EOF instead preserves the process exit
+			// status: killing it here would hide a failure between whole frames.
+			if readErr != nil || limited {
+				cancel()
+			}
+			if err := response.Body.Close(); readErr == nil && !limited {
+				readErr = err
+			}
 		}
-		cancel()
+		if err := request.Close(); readErr == nil && !limited {
+			readErr = err
+		}
+		if readErr != nil || limited {
+			cancel()
+		}
+		// EOF on stdin lets dial-stdio exit after the complete response. A
+		// misbehaving CLI still has a bounded reap, even with a live Job context.
+		stopReap := time.AfterFunc(commandWaitDelay, cancel)
 		waitErr := command.Wait()
+		stopReap.Stop()
 		// A stop by the caller's context is reported as that context error, so
 		// callers can tell an expected stop from a stream failure. Neither error
 		// carries CLI diagnostics or output.
 		if ctx.Err() != nil && (readErr != nil || waitErr != nil) {
 			return fmt.Errorf("docker output stream stopped: %w", ctx.Err())
 		}
-		if readErr != nil {
+		if readErr != nil || (waitErr != nil && !limited) {
 			return errors.New("docker output stream failed")
 		}
 		return nil

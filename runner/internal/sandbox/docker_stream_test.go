@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -103,6 +104,20 @@ func TestMain(m *testing.M) {
 		fmt.Fprint(os.Stderr, "Docker CLI diagnostic")
 		os.Exit(1)
 	}
+	if mode == "complete" || mode == "frame-then-failure" {
+		// Consume the request before replying so an early child exit cannot
+		// turn this regression into a request-write failure instead.
+		request := bufio.NewReader(os.Stdin)
+		for {
+			line, err := request.ReadString('\n')
+			if err != nil {
+				os.Exit(2)
+			}
+			if line == "\r\n" {
+				break
+			}
+		}
+	}
 	fmt.Fprint(os.Stdout, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
 	if mode == "flood" {
 		// Like a running container with unbounded output, frames never end
@@ -122,7 +137,47 @@ func TestMain(m *testing.M) {
 	binary.BigEndian.PutUint32(header[4:], uint32(len("failure diagnostics\n")))
 	os.Stdout.Write(header[:])
 	os.Stdout.WriteString("failure diagnostics\n")
+	if mode == "complete" {
+		os.Exit(0)
+	}
+	if mode == "frame-then-failure" {
+		os.Exit(7)
+	}
 	<-ctx.Done()
+}
+
+func TestCLIDockerStreamChecksProcessExitAfterCompleteFrames(t *testing.T) {
+	for _, mode := range []string{"complete", "frame-then-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("ZEROYAML_TEST_LOG_FOLLOWER", mode)
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			sink := &logSink{}
+			capture := joblogs.NewCapture(ctx, "job", sink)
+			err = cliDockerStream(executable)(ctx, capture.Writer(joblogs.Stdout), capture.Writer(joblogs.Stderr), "container")
+			failed := mode == "frame-then-failure"
+			if (err != nil) != failed {
+				t.Fatalf("follower error = %v, want failure = %t", err, failed)
+			}
+			if failed && err.Error() != "docker output stream failed" {
+				t.Fatalf("unsanitized follower error = %v", err)
+			}
+			if err != nil {
+				capture.MarkIncomplete()
+			}
+			if err := capture.Close(context.Background(), false); err != nil {
+				t.Fatal(err)
+			}
+			if len(sink.records) != 2 || string(sink.records[0].Content) != "failure diagnostics\n" ||
+				sink.records[1].Incomplete != failed || sink.records[1].Truncated {
+				t.Fatalf("captured output or completeness lost: %+v", sink.records)
+			}
+		})
+	}
 }
 
 func TestCLIDockerStreamRequiresContainerIdentity(t *testing.T) {
